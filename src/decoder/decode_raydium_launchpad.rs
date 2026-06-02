@@ -240,6 +240,27 @@ mod tests {
     }
 
     #[test]
+    fn decodes_sell_exact_out_variant_maps_to_sell() {
+        // Proves the *_exact_out variants map correctly (here sell_exact_out → Sell).
+        // Token balance for MINT goes 5_000_000 -> 1_000_000; trader gains 2.0 SOL.
+        let result = build_result(
+            vec![1_000_000_000, 0],
+            vec![3_000_000_000, 0],
+            vec![token_balance(MINT, TRADER, "5000000", 6)],
+            vec![token_balance(MINT, TRADER, "1000000", 6)],
+        );
+        let whales: HashSet<String> = HashSet::new();
+
+        let event = decode(&result, &instruction(&DISC_SELL_EXACT_OUT), &whales)
+            .expect("sell_exact_out decodes");
+
+        assert_eq!(event.action, TradeAction::Sell);
+        assert_eq!(event.dex, DexProtocol::RaydiumLaunchpad);
+        assert_eq!(event.token_amount, 4_000_000);
+        assert_eq!(event.sol_amount, 2.0);
+    }
+
+    #[test]
     fn returns_none_for_non_buy_sell_discriminator() {
         // A non-trade discriminator (initialize/migrate/etc.) must be skipped.
         let other_disc: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
