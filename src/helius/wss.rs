@@ -81,12 +81,14 @@ pub fn parse_notification(text: &str) -> Option<HeliusNotification> {
     }
 }
 
-/// Decode a notification into a trade event by routing through the decoder.
+/// Decode a notification into ALL its trade events by routing every DEX instruction
+/// (top-level + inner CPI) through the decoder. Guard 1 (bot filter) needs the full
+/// per-transaction group, so the loop forwards these grouped events as one unit.
 pub fn decode_notification(
     notification: &HeliusNotification,
     whales: &HashSet<String>,
-) -> Option<DecodedTradeEvent> {
-    crate::decoder::route(&notification.params.result, whales)
+) -> Vec<DecodedTradeEvent> {
+    crate::decoder::route_all(&notification.params.result, whales)
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +102,7 @@ pub fn decode_notification(
 pub async fn run(
     config: BotConfig,
     whales: HashSet<String>,
-    sender: UnboundedSender<DecodedTradeEvent>,
+    sender: UnboundedSender<Vec<DecodedTradeEvent>>,
 ) -> anyhow::Result<()> {
     let url = build_wss_url(&config);
     let accounts: Vec<String> = config
@@ -153,7 +155,7 @@ async fn connect_once(
     url: &str,
     accounts: &[String],
     whales: &HashSet<String>,
-    sender: &UnboundedSender<DecodedTradeEvent>,
+    sender: &UnboundedSender<Vec<DecodedTradeEvent>>,
     backoff: &mut Duration,
 ) -> ConnectionOutcome {
     tracing::info!("connecting to Helius WSS endpoint: {}", url);
@@ -193,10 +195,9 @@ async fn connect_once(
         match message {
             Message::Text(text) => {
                 if let Some(notification) = parse_notification(&text) {
-                    if let Some(event) = decode_notification(&notification, whales) {
-                        if sender.send(event).is_err() {
-                            return ConnectionOutcome::ReceiverClosed;
-                        }
+                    let events = decode_notification(&notification, whales);
+                    if !events.is_empty() && sender.send(events).is_err() {
+                        return ConnectionOutcome::ReceiverClosed;
                     }
                 }
             }
@@ -420,7 +421,8 @@ mod tests {
         };
         let whales: HashSet<String> = HashSet::new();
 
-        let event = decode_notification(&notification, &whales).expect("pumpfun buy decodes");
-        assert_eq!(event.dex, DexProtocol::PumpFun);
+        let events = decode_notification(&notification, &whales);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].dex, DexProtocol::PumpFun);
     }
 }
