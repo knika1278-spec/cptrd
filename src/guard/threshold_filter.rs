@@ -5,6 +5,11 @@ use crate::models::types::{DecodedTradeEvent, TradeAction};
 /// Guard 2: minimum SOL threshold, applied to BUYS only (sells always pass). Mutates the event:
 /// sets `passed_threshold` and `guard_skip_reason`. (roadmap §Guards)
 pub fn apply_threshold(event: &mut DecodedTradeEvent, min_sol_threshold: f64) {
+    // Bot events are classified/routed by the bot flag and keep their bot reason; threshold
+    // gating does not apply to them (and must not overwrite `guard_skip_reason`).
+    if event.is_bot_whale {
+        return;
+    }
     if event.action == TradeAction::Buy && event.sol_amount < min_sol_threshold {
         event.passed_threshold = false;
         event.guard_skip_reason = Some(format!(
@@ -67,5 +72,17 @@ mod tests {
 
         assert!(e.passed_threshold);
         assert!(e.guard_skip_reason.is_none());
+    }
+
+    #[test]
+    fn bot_event_keeps_bot_reason_and_is_not_overwritten() {
+        let mut e = event(TradeAction::Buy, 0.1);
+        e.is_bot_whale = true;
+        e.guard_skip_reason = Some("bot reason".to_string());
+
+        // Would otherwise be skipped for being below threshold; bot flag short-circuits.
+        apply_threshold(&mut e, 2.0);
+
+        assert_eq!(e.guard_skip_reason.as_deref(), Some("bot reason"));
     }
 }

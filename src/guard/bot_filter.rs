@@ -36,12 +36,14 @@ pub fn detect_bot(events: &[DecodedTradeEvent]) -> Option<String> {
     None
 }
 
-/// Apply Guard 1: if `detect_bot` returns `Some(reason)`, set `is_bot_whale = true` on ALL events
-/// and return the reason.
+/// Apply Guard 1: if `detect_bot` returns `Some(reason)`, set `is_bot_whale = true` and
+/// `guard_skip_reason = Some(reason)` on ALL events (so `bot_whales.json` records WHY it was
+/// flagged), and return the reason.
 pub fn apply_bot_filter(events: &mut [DecodedTradeEvent]) -> Option<String> {
     let reason = detect_bot(events)?;
     for event in events.iter_mut() {
         event.is_bot_whale = true;
+        event.guard_skip_reason = Some(reason.clone());
     }
     Some(reason)
 }
@@ -83,7 +85,12 @@ mod tests {
 
         let applied = apply_bot_filter(&mut events);
         assert!(applied.is_some());
+        let bot_reason = applied.unwrap();
         assert!(events.iter().all(|e| e.is_bot_whale));
+        // Each flagged event records the bot reason.
+        assert!(events
+            .iter()
+            .all(|e| e.guard_skip_reason.as_deref() == Some(bot_reason.as_str())));
     }
 
     #[test]

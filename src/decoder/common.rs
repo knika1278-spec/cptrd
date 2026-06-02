@@ -55,6 +55,19 @@ pub fn find_trader(msg: &TxMessage, whales: &HashSet<String>) -> Option<(usize, 
         }
     }
 
+    // No signer was in a non-empty whale set: we fall back to the first signer below.
+    // TODO (Phase 2): production whale should be among signers; first-signer fallback can misattribute whale_address.
+    if !whales.is_empty() {
+        if let Some((idx, ref pubkey)) = first_signer {
+            tracing::debug!(
+                fallback_signer = %pubkey,
+                fallback_index = idx,
+                whale_set_len = whales.len(),
+                "find_trader: no whale among signers, falling back to first signer"
+            );
+        }
+    }
+
     first_signer
 }
 
