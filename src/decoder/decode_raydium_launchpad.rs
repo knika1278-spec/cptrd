@@ -26,6 +26,9 @@ const DISC_BUY_EXACT_OUT: [u8; 8] = [24, 211, 116, 40, 105, 3, 153, 56];
 const DISC_SELL_EXACT_IN: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
 const DISC_SELL_EXACT_OUT: [u8; 8] = [95, 200, 71, 34, 8, 9, 11, 166];
 
+/// `payer` (trader) account index in Raydium Launchpad buy/sell instructions (docs §4).
+const TRADER_ACCOUNT_INDEX: usize = 0;
+
 // NOTE: For more precise fills (fees included), exact amounts could later be
 // read from a Raydium Launchpad `TradeEvent` log (docs §4) instead. Phase 1
 // uses balance deltas per §0.
@@ -52,9 +55,9 @@ pub fn decode(
         _ => return None,
     };
 
-    // 3. Trader = tracked whale signer (falls back to first signer, see §0/common).
-    let msg = &result.transaction.transaction.message;
-    let (trader_idx, trader) = common::find_trader(msg, whales)?;
+    // 3. Trader = tracked whale signer, cross-checked against the DEX trader-index account (§0/§4).
+    let (trader_idx, trader) =
+        common::resolve_trader(result, instruction, whales, TRADER_ACCOUNT_INDEX)?;
 
     // 4. Amounts from balance deltas (§0) — NOT instruction args.
     let (mint, tok_delta, decimals) =

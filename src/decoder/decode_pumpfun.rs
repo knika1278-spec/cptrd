@@ -18,6 +18,9 @@ pub const PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const DISC_BUY: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 const DISC_SELL: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 
+/// `user` (trader) account index in PumpFun buy/sell instructions (docs §2).
+const TRADER_ACCOUNT_INDEX: usize = 6;
+
 // NOTE: For more precise fills (fees included), exact amounts could later be
 // read from the PumpFun `TradeEvent` (disc [189,219,127,211,78,230,97,238])
 // emitted via self-CPI/log (docs §2). Phase 1 uses balance deltas per §0.
@@ -43,9 +46,9 @@ pub fn decode(
         _ => return None,
     };
 
-    // 3. Trader = tracked whale signer (falls back to first signer, see §0/common).
-    let msg = &result.transaction.transaction.message;
-    let (trader_idx, trader) = common::find_trader(msg, whales)?;
+    // 3. Trader = tracked whale signer, cross-checked against the DEX trader-index account (§0/§2).
+    let (trader_idx, trader) =
+        common::resolve_trader(result, instruction, whales, TRADER_ACCOUNT_INDEX)?;
 
     // 4. Amounts from balance deltas (§0) — NOT instruction args.
     let (mint, tok_delta, decimals) =

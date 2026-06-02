@@ -33,6 +33,11 @@ const DISC_SWAP_EXACT_OUT2: [u8; 8] = [43, 215, 247, 132, 137, 60, 243, 81];
 const DISC_SWAP_WITH_PRICE_IMPACT: [u8; 8] = [56, 173, 230, 208, 173, 228, 156, 205];
 const DISC_SWAP_WITH_PRICE_IMPACT2: [u8; 8] = [74, 98, 192, 214, 177, 51, 75, 51];
 
+/// `user` (trader, signer) account index in the DLMM `swap` instruction (docs §5).
+/// `swap2` inserts `memo_program`, shifting later accounts; `resolve_trader` prefers the
+/// whale signer and logs when the DEX-index account drifts from it.
+const TRADER_ACCOUNT_INDEX: usize = 10;
+
 /// True if `disc` is one of the six DLMM swap discriminators (docs §5).
 ///
 /// Liquidity ops (`add_liquidity`, `remove_liquidity`, `rebalance_liquidity`,
@@ -73,9 +78,9 @@ pub fn decode(
         return None;
     }
 
-    // 3. Trader = tracked whale signer (falls back to first signer, see §0/common).
-    let msg = &result.transaction.transaction.message;
-    let (trader_idx, trader) = common::find_trader(msg, whales)?;
+    // 3. Trader = tracked whale signer, cross-checked against the DEX trader-index account (§0/§5).
+    let (trader_idx, trader) =
+        common::resolve_trader(result, instruction, whales, TRADER_ACCOUNT_INDEX)?;
 
     // 4. DIRECTION + SOL amount from SOL/WSOL movement (§0/§5) — NOT from the
     //    discriminator. Negative = trader spent SOL/WSOL (Buy); positive =

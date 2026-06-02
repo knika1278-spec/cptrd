@@ -7,7 +7,7 @@
 
 use std::collections::HashSet;
 
-use crate::models::types::{TxMessage, TxMeta, TxResult};
+use crate::models::types::{TxMessage, TxMeta, TxResult, UiInstruction};
 
 /// Wrapped SOL mint (string form, per §0 constants).
 pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
@@ -55,20 +55,96 @@ pub fn find_trader(msg: &TxMessage, whales: &HashSet<String>) -> Option<(usize, 
         }
     }
 
-    // No signer was in a non-empty whale set: we fall back to the first signer below.
-    // TODO (Phase 2): production whale should be among signers; first-signer fallback can misattribute whale_address.
-    if !whales.is_empty() {
-        if let Some((idx, ref pubkey)) = first_signer {
-            tracing::debug!(
-                fallback_signer = %pubkey,
-                fallback_index = idx,
-                whale_set_len = whales.len(),
-                "find_trader: no whale among signers, falling back to first signer"
-            );
+    // With a non-empty whale set, a signer that is NOT a tracked whale must never be attributed
+    // as the trader — doing so silently records the wrong whale_address. Only fall back to the
+    // first signer when we track no whales at all (tests / no-whale config).
+    if whales.is_empty() {
+        return first_signer;
+    }
+    if let Some((idx, ref pubkey)) = first_signer {
+        tracing::debug!(
+            first_signer = %pubkey,
+            first_signer_index = idx,
+            whale_set_len = whales.len(),
+            "find_trader: no tracked whale among signers; refusing to attribute"
+        );
+    }
+    None
+}
+
+/// Resolve the trading whale for a DEX instruction, cross-checking the DEX's documented trader
+/// account index (`dex_trader_index`, per docs/dex-reference.md) against the transaction signers
+/// and the tracked whale set. This is stronger than signer-in-whale-set alone: it validates the
+/// resolved trader against the position the IDL designates as the trader.
+///
+/// Resolution order (most → least trustworthy):
+/// 1. A signer in the tracked whale set ([`find_trader`]); the DEX-index account is compared
+///    against it for observability (logs on drift, e.g. Meteora `swap2` optional-account shifts).
+/// 2. Empty whale set (tests / no-whale config): the DEX-index account if it is a signer, else
+///    the first signer.
+/// 3. Non-empty whale set with no whale signer: the DEX-index account ONLY if it is a signer
+///    (the IDL designates it the trader); otherwise `None` — we never guess.
+///
+/// Returns `(balance_index, address)` where `balance_index` aligns with `meta.pre/post_balances`.
+pub fn resolve_trader(
+    result: &TxResult,
+    instruction: &UiInstruction,
+    whales: &HashSet<String>,
+    dex_trader_index: usize,
+) -> Option<(usize, String)> {
+    let msg = &result.transaction.transaction.message;
+    let index_addr: Option<&str> = instruction
+        .accounts
+        .as_deref()
+        .and_then(|accounts| accounts.get(dex_trader_index))
+        .map(String::as_str);
+
+    if let Some((idx, addr)) = find_trader(msg, whales) {
+        // `find_trader` only returns a non-whale signer when the whale set is empty.
+        if !whales.is_empty() {
+            if let Some(ix_addr) = index_addr {
+                if ix_addr != addr {
+                    tracing::debug!(
+                        dex_trader_index,
+                        dex_index_account = %ix_addr,
+                        whale_signer = %addr,
+                        "resolve_trader: whale signer differs from DEX trader-index account"
+                    );
+                }
+            }
+            return Some((idx, addr));
         }
+        // Empty whale set: prefer the DEX-index account if it is a signer; else the first signer.
+        if let Some(ix_addr) = index_addr {
+            if let Some(balance_index) = signer_balance_index(msg, ix_addr) {
+                return Some((balance_index, ix_addr.to_string()));
+            }
+        }
+        return Some((idx, addr));
     }
 
-    first_signer
+    // Non-empty whale set, no whale among signers: accept the DEX-index account iff it signs.
+    if let Some(ix_addr) = index_addr {
+        if let Some(balance_index) = signer_balance_index(msg, ix_addr) {
+            tracing::warn!(
+                dex_trader_index,
+                dex_index_account = %ix_addr,
+                "resolve_trader: no tracked whale among signers; using DEX trader-index signer"
+            );
+            return Some((balance_index, ix_addr.to_string()));
+        }
+    }
+    tracing::warn!(
+        "resolve_trader: no tracked-whale signer and no usable DEX trader-index account; skipping"
+    );
+    None
+}
+
+/// Index of `addr` within `account_keys` (which aligns with the balance arrays) iff it is a signer.
+fn signer_balance_index(msg: &TxMessage, addr: &str) -> Option<usize> {
+    msg.account_keys
+        .iter()
+        .position(|k| k.signer && k.pubkey == addr)
 }
 
 /// SOL lamport delta for an account index: `post - pre`. `None` if the index is
@@ -195,8 +271,39 @@ pub fn wsol_delta_for_owner(meta: &TxMeta, owner: &str) -> Option<i128> {
 mod tests {
     use super::*;
     use crate::models::types::{
-        AccountKey, TokenBalance, TxEnvelope, TxInner, TxMessage, TxMeta, UiTokenAmount,
+        AccountKey, TokenBalance, TxEnvelope, TxInner, TxMessage, TxMeta, UiInstruction,
+        UiTokenAmount,
     };
+
+    fn result_with_keys(keys: Vec<AccountKey>) -> TxResult {
+        TxResult {
+            signature: "sig".to_string(),
+            slot: 1,
+            transaction: TxEnvelope {
+                transaction: TxInner {
+                    message: TxMessage {
+                        account_keys: keys,
+                        instructions: vec![],
+                    },
+                },
+                meta: empty_meta(),
+            },
+        }
+    }
+
+    fn ix_with_accounts(accounts: &[&str]) -> UiInstruction {
+        UiInstruction {
+            program_id: Some("Prog".to_string()),
+            accounts: Some(accounts.iter().map(|s| s.to_string()).collect()),
+            data: None,
+            parsed: None,
+            program: None,
+        }
+    }
+
+    fn whale_set(addrs: &[&str]) -> HashSet<String> {
+        addrs.iter().map(|s| s.to_string()).collect()
+    }
 
     fn account_key(pubkey: &str, signer: bool) -> AccountKey {
         AccountKey {
@@ -450,6 +557,80 @@ mod tests {
         assert_eq!(
             resolved_account_keys(&result),
             vec!["Static0".to_string(), "W1".to_string(), "R1".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_trader_returns_none_when_whales_present_but_no_whale_signs() {
+        // Phase 2 fix: a non-whale signer must NOT be attributed when we track whales.
+        let msg = TxMessage {
+            account_keys: vec![
+                account_key("RandomSigner", true),
+                account_key("AnotherSigner", true),
+            ],
+            instructions: vec![],
+        };
+        let whales = whale_set(&["Whale1"]);
+        assert_eq!(find_trader(&msg, &whales), None);
+    }
+
+    #[test]
+    fn resolve_trader_returns_whale_signer_even_if_dex_index_differs() {
+        // Whale signs at account index 1; the DEX trader-index account is something else.
+        let result = result_with_keys(vec![
+            account_key("FeePayer", true),
+            account_key("Whale1", true),
+        ]);
+        let ix = ix_with_accounts(&["SomeOtherAccount", "Whale1"]);
+        let whales = whale_set(&["Whale1"]);
+        // dex_trader_index 0 points at "SomeOtherAccount" (drift) — whale signer still wins.
+        assert_eq!(
+            resolve_trader(&result, &ix, &whales, 0),
+            Some((1, "Whale1".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_trader_uses_dex_index_signer_when_no_whale_signs() {
+        // Non-empty whale set, no whale among signers, but the DEX-index account IS a signer:
+        // trust the IDL-designated trader position rather than guessing or misattributing.
+        let result = result_with_keys(vec![
+            account_key("FeePayer", true),
+            account_key("DexTrader", true),
+        ]);
+        let ix = ix_with_accounts(&["DexTrader"]);
+        let whales = whale_set(&["UntrackedWhale"]);
+        assert_eq!(
+            resolve_trader(&result, &ix, &whales, 0),
+            Some((1, "DexTrader".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_trader_returns_none_when_no_whale_and_dex_index_not_signer() {
+        // No whale signer and the DEX-index account is not a signer → refuse to guess.
+        let result = result_with_keys(vec![
+            account_key("FeePayer", true),
+            account_key("NotASigner", false),
+        ]);
+        let ix = ix_with_accounts(&["NotASigner"]);
+        let whales = whale_set(&["UntrackedWhale"]);
+        assert_eq!(resolve_trader(&result, &ix, &whales, 0), None);
+    }
+
+    #[test]
+    fn resolve_trader_empty_whale_set_falls_back_to_first_signer() {
+        // No whales tracked (test/no-config path): first signer is used when the DEX index
+        // account isn't a present signer.
+        let result = result_with_keys(vec![
+            account_key("FirstSigner", true),
+            account_key("Reader", false),
+        ]);
+        let ix = ix_with_accounts(&["Reader"]); // index 0 -> non-signer
+        let whales: HashSet<String> = HashSet::new();
+        assert_eq!(
+            resolve_trader(&result, &ix, &whales, 0),
+            Some((0, "FirstSigner".to_string()))
         );
     }
 }
