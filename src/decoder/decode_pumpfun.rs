@@ -50,13 +50,18 @@ pub fn decode(
     // 4. Amounts from balance deltas (§0) — NOT instruction args.
     let (mint, tok_delta, decimals) =
         common::traded_mint_for_owner(&result.transaction.meta, &trader)?;
-    let token_amount = tok_delta.unsigned_abs() as u64;
+    // Overflow-safe: `unsigned_abs()` is u128; truncating to u64 silently would
+    // misreport. A delta exceeding u64 is a non-trade artifact → skip.
+    let token_amount = u64::try_from(tok_delta.unsigned_abs()).ok()?;
 
     let lamports = common::sol_lamport_delta(&result.transaction.meta, trader_idx)?;
     let sol_amount = (lamports.unsigned_abs() as f64) / 1_000_000_000.0;
 
     // 5. Build the event. is_bot_whale/passed_threshold/guard_skip_reason/
     // decoded_at are placeholders filled by the guard/output layers later.
+    // `passed_threshold` starts `false` (conservative sentinel): the threshold
+    // guard sets it definitively, and an unchecked trade must never read as
+    // having passed.
     Some(DecodedTradeEvent {
         signature: result.signature.clone(),
         slot: result.slot,
@@ -69,7 +74,7 @@ pub fn decode(
         token_amount,
         token_decimals: decimals,
         is_bot_whale: false,
-        passed_threshold: true,
+        passed_threshold: false,
         guard_skip_reason: None,
         decoded_at: None,
     })
@@ -177,6 +182,8 @@ mod tests {
         assert_eq!(event.sol_amount, 3.5);
         assert_eq!(event.signature, "5xSignatureExample");
         assert_eq!(event.slot, 987_654_321);
+        // Conservative sentinel: the guard layer sets this definitively later.
+        assert!(!event.passed_threshold);
     }
 
     #[test]
@@ -213,6 +220,21 @@ mod tests {
         let whales: HashSet<String> = HashSet::new();
 
         assert!(decode(&result, &instruction(&other_disc), &whales).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_trader_has_no_token_balances() {
+        // Valid Buy disc, but no token-balance entries for the trader →
+        // traded_mint_for_owner returns None, which must propagate.
+        let result = build_result(
+            vec![10_000_000_000, 0],
+            vec![6_500_000_000, 0],
+            vec![],
+            vec![],
+        );
+        let whales: HashSet<String> = HashSet::new();
+
+        assert!(decode(&result, &instruction(&DISC_BUY), &whales).is_none());
     }
 
     #[test]
