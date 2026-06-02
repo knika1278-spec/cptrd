@@ -26,13 +26,78 @@ fn default_min_sol_threshold() -> f64 {
 /// Top-level bot configuration (typically loaded from `whales.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BotConfig {
+    /// Helius API key. Loaded from `HELIUS_API_KEY` env var if absent.
+    #[serde(default)]
     pub helius_api_key: String,
-    /// Built from the key if absent (see `docs/dex-reference.md` §1).
+    /// Custom WSS URL. Built from the key if absent (see `docs/dex-reference.md` §1).
+    #[serde(default)]
     pub helius_wss_url: Option<String>,
     #[serde(default)]
     pub whales: Vec<WhaleConfig>,
     #[serde(default = "default_min_sol_threshold")]
     pub min_sol_threshold: f64,
+    /// Executor configuration for trade execution. Absent = monitoring-only mode.
+    #[serde(default)]
+    pub executor: Option<ExecutorConfig>,
+}
+
+/// Execution configuration — when present, the bot will execute copy trades.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutorConfig {
+    /// Priority fee in microlamports per compute unit.
+    #[serde(default)]
+    pub priority_fee_microlamports: u64,
+    /// Compute unit limit for swap transactions.
+    #[serde(default = "default_compute_units")]
+    pub compute_unit_limit: u32,
+    /// Whether to use Jito bundles for MEV protection.
+    #[serde(default)]
+    pub use_jito: bool,
+    /// Jito tip amount in lamports (only used when use_jito is true).
+    #[serde(default = "default_jito_tip")]
+    pub jito_tip_lamports: u64,
+    /// Per-protocol trade configuration. Falls back to defaults if not specified for a protocol.
+    #[serde(default)]
+    pub protocols: ProtocolConfigs,
+}
+
+/// Per-protocol trade parameters.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProtocolConfigs {
+    #[serde(default)]
+    pub pumpfun: Option<ProtocolTradeConfig>,
+    #[serde(default)]
+    pub pumpswap: Option<ProtocolTradeConfig>,
+    #[serde(default)]
+    pub raydium_launchpad: Option<ProtocolTradeConfig>,
+    #[serde(default)]
+    pub raydium_amm_v4: Option<ProtocolTradeConfig>,
+    #[serde(default)]
+    pub meteora_dlmm: Option<ProtocolTradeConfig>,
+}
+
+/// Trade parameters for a specific protocol.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProtocolTradeConfig {
+    /// Buy amount in SOL (human-readable, e.g. 0.03 = 30_000_000 lamports).
+    pub buy_sol_amount: f64,
+    /// Slippage tolerance in basis points (300 = 3%).
+    pub slippage_bps: u16,
+    /// Whether to auto-copy sells (when the whale sells, we sell too).
+    #[serde(default = "default_true")]
+    pub copy_sells: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_compute_units() -> u32 {
+    140_000 // Swap transactions typically use 100-140k CU
+}
+
+fn default_jito_tip() -> u64 {
+    10_000 // 0.00001 SOL
 }
 
 /// Supported DEX programs. Identify by program ID, never by discriminator.
@@ -41,6 +106,7 @@ pub enum DexProtocol {
     PumpFun,
     PumpSwap,
     RaydiumLaunchpad,
+    RaydiumAmmV4,
     MeteoraDlmmV2,
     Unknown,
 }
@@ -70,6 +136,26 @@ pub struct DecodedTradeEvent {
     pub guard_skip_reason: Option<String>,
     /// Set later by the output layer (ISO-8601). Defaults to `None`.
     pub decoded_at: Option<String>,
+    /// Result of executing this trade (if execution was attempted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionResult>,
+}
+
+/// Result of executing a trade on-chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutionResult {
+    /// Transaction signature of the executed trade.
+    pub tx_signature: String,
+    /// Whether the transaction was confirmed on-chain.
+    pub confirmed: bool,
+    /// Actual SOL spent/received (lamports).
+    pub actual_sol_lamports: u64,
+    /// Actual tokens received/sent (raw amount).
+    pub actual_token_amount: u64,
+    /// Error message if execution failed.
+    pub error: Option<String>,
+    /// ISO-8601 timestamp of execution.
+    pub executed_at: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -239,6 +325,7 @@ mod tests {
             passed_threshold: true,
             guard_skip_reason: None,
             decoded_at: None,
+            execution: None,
         };
 
         let json = serde_json::to_string(&event).expect("serialize");

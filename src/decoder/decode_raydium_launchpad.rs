@@ -89,6 +89,7 @@ pub fn decode(
         passed_threshold: false,
         guard_skip_reason: None,
         decoded_at: None,
+        execution: None,
     })
 }
 

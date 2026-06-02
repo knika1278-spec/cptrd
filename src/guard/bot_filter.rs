@@ -69,6 +69,7 @@ mod tests {
             passed_threshold: true,
             guard_skip_reason: None,
             decoded_at: None,
+            execution: None,
         }
     }
 

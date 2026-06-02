@@ -246,6 +246,7 @@ mod tests {
                 label: None,
             }],
             min_sol_threshold: 2.0,
+            executor: None,
         }
     }
 

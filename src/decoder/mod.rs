@@ -4,6 +4,7 @@ pub mod common;
 pub mod decode_meteora_dlmm;
 pub mod decode_pumpfun;
 pub mod decode_pumpswap;
+pub mod decode_raydium_amm_v4;
 pub mod decode_raydium_launchpad;
 
 use std::collections::HashSet;
@@ -62,6 +63,9 @@ fn dispatch(
         decode_pumpswap::PROGRAM_ID => decode_pumpswap::decode(result, instruction, whales),
         decode_raydium_launchpad::PROGRAM_ID => {
             decode_raydium_launchpad::decode(result, instruction, whales)
+        }
+        decode_raydium_amm_v4::PROGRAM_ID => {
+            decode_raydium_amm_v4::decode(result, instruction, whales)
         }
         decode_meteora_dlmm::PROGRAM_ID => decode_meteora_dlmm::decode(result, instruction, whales),
         _ => None,

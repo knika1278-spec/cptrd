@@ -6,10 +6,12 @@
 //! and the JSON writer run per event. Ctrl-C triggers graceful shutdown.
 
 mod decoder;
+mod executor;
 mod guard;
 mod helius;
 mod models;
 mod output;
+mod source;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -17,8 +19,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use tracing_subscriber::EnvFilter;
 
-use crate::helius::wss;
 use crate::models::types::{BotConfig, DecodedTradeEvent};
+use solana_sdk::signature::Signer;
 
 /// Default config path when `WHALES_CONFIG_PATH` is unset.
 const DEFAULT_CONFIG_PATH: &str = "config/whales.json";
@@ -69,8 +71,49 @@ async fn main() -> anyhow::Result<()> {
 
     let min_threshold = config.min_sol_threshold;
 
+    // Initialize executor (if configured)
+    let executor_ctx = match &config.executor {
+        Some(exec_cfg) => {
+            let rpc_url = std::env::var("RPC_URL")
+                .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
+            tracing::info!(
+                rpc_url = %rpc_url,
+                "trade execution ENABLED"
+            );
+            let keypair = executor::wallet::load_keypair()
+                .context("failed to load executor keypair")?;
+            tracing::info!(
+                wallet = %keypair.pubkey(),
+                "executor wallet loaded"
+            );
+            let blockhash_cache = executor::tx_utils::BlockhashCache::new(&rpc_url);
+            tracing::info!("blockhash cache initialized (refresh every 2s)");
+            Some(ExecutionContext {
+                rpc_url,
+                keypair,
+                protocol_configs: exec_cfg.protocols.clone(),
+                priority_fee_microlamports: exec_cfg.priority_fee_microlamports,
+                compute_unit_limit: exec_cfg.compute_unit_limit,
+                blockhash_cache,
+                use_jito: exec_cfg.use_jito,
+                jito_tip_lamports: exec_cfg.jito_tip_lamports,
+            })
+        }
+        None => {
+            tracing::info!("trade execution DISABLED (no executor config)");
+            None
+        }
+    };
+
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<DecodedTradeEvent>>();
-    let wss_handle = tokio::spawn(async move { wss::run(config, whales, tx).await });
+
+    // Select source mode: WSS (default) or GRPC
+    let source_mode = source::SourceMode::from_env();
+    tracing::info!(mode = ?source_mode, "transaction source mode");
+
+    let wss_handle = tokio::spawn(async move {
+        source::run(source_mode, config, whales, tx).await
+    });
 
     tracing::info!(
         "copytrade pipeline started (min threshold {:.4} SOL)",
@@ -82,7 +125,7 @@ async fn main() -> anyhow::Result<()> {
             maybe_events = rx.recv() => {
                 match maybe_events {
                     Some(mut events) => {
-                        process_group(&mut events, min_threshold, &output_dir);
+                        process_group(&mut events, min_threshold, &output_dir, executor_ctx.as_ref());
                     }
                     None => {
                         tracing::info!("WSS task ended (channel closed); shutting down");
@@ -102,6 +145,18 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Execution context — holds the keypair and config for trade execution.
+struct ExecutionContext {
+    rpc_url: String,
+    keypair: solana_sdk::signature::Keypair,
+    protocol_configs: crate::models::types::ProtocolConfigs,
+    priority_fee_microlamports: u64,
+    compute_unit_limit: u32,
+    blockhash_cache: executor::tx_utils::BlockhashCache,
+    use_jito: bool,
+    jito_tip_lamports: u64,
+}
+
 /// Run the guard → output pipeline over one transaction's decoded events:
 /// Guard 1 (bot filter) over the whole group, then Guard 2 (threshold) and the JSON
 /// writer per event. Logs a concise line per event.
@@ -109,6 +164,7 @@ fn process_group(
     events: &mut [DecodedTradeEvent],
     min_threshold: f64,
     output_dir: &std::path::Path,
+    executor_ctx: Option<&ExecutionContext>,
 ) {
     if let Some(reason) = guard::bot_filter::apply_bot_filter(events) {
         let signature = events.first().map(|e| e.signature.as_str()).unwrap_or("");
@@ -137,6 +193,55 @@ fn process_group(
             skip_reason = %skip,
             "decoded trade event"
         );
+
+        // Execute copy trade if executor is configured and event passed guards
+        if let Some(ctx) = executor_ctx {
+            if event.passed_threshold && !event.is_bot_whale {
+                tracing::info!(
+                    action = ?event.action,
+                    mint = %event.mint,
+                    sol_amount = event.sol_amount,
+                    "executing copy trade"
+                );
+
+                let result = tokio::runtime::Handle::current().block_on(async {
+                    executor::execute_copy_trade(
+                        &ctx.rpc_url,
+                        &ctx.keypair,
+                        &event.mint,
+                        event.action,
+                        event.dex,
+                        event.token_amount,
+                        &ctx.protocol_configs,
+                        ctx.priority_fee_microlamports,
+                        ctx.compute_unit_limit,
+                        &ctx.blockhash_cache,
+                        ctx.use_jito,
+                        ctx.jito_tip_lamports,
+                    )
+                    .await
+                });
+
+                match result {
+                    Ok(exec_result) => {
+                        tracing::info!(
+                            tx = %exec_result.tx_signature,
+                            confirmed = exec_result.confirmed,
+                            "copy trade executed successfully"
+                        );
+                        event.execution = Some(exec_result);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            action = ?event.action,
+                            mint = %event.mint,
+                            "copy trade execution failed: {:#}",
+                            err
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
