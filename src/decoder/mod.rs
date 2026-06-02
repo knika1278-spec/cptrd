@@ -20,6 +20,16 @@ pub fn route(result: &TxResult, whales: &HashSet<String>) -> Option<DecodedTrade
         .find_map(|instr| dispatch(result, instr, whales))
 }
 
+/// Decode EVERY DEX instruction in the transaction (top-level + inner/CPI), not just the first.
+/// Used by the bot filter to detect multi-swap / buy+sell-same-tx arbitrage patterns. Reuses the
+/// same instruction-collection and dispatch logic as `route`.
+pub fn route_all(result: &TxResult, whales: &HashSet<String>) -> Vec<DecodedTradeEvent> {
+    all_instructions(result)
+        .into_iter()
+        .filter_map(|instr| dispatch(result, instr, whales))
+        .collect()
+}
+
 /// Collect references to every instruction: top-level `message.instructions` first, then each
 /// `meta.inner_instructions[].instructions` (CPIs), preserving order.
 fn all_instructions(result: &TxResult) -> Vec<&UiInstruction> {
@@ -195,5 +205,29 @@ mod tests {
         let whales: HashSet<String> = HashSet::new();
 
         assert!(route(&result, &whales).is_none());
+    }
+
+    #[test]
+    fn route_all_collects_top_level_and_inner_dex_instructions() {
+        // One PumpFun buy top-level + another PumpFun buy in an inner CPI → both decode.
+        let result = build_result(
+            vec![buy_instruction(decode_pumpfun::PROGRAM_ID)],
+            vec![buy_instruction(decode_pumpfun::PROGRAM_ID)],
+        );
+        let whales: HashSet<String> = HashSet::new();
+
+        let events = route_all(&result, &whales);
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.dex == DexProtocol::PumpFun));
+        assert!(events.iter().all(|e| e.action == TradeAction::Buy));
+    }
+
+    #[test]
+    fn route_all_returns_empty_for_no_dex_transaction() {
+        let result = build_result(vec![], vec![]);
+        let whales: HashSet<String> = HashSet::new();
+
+        assert!(route_all(&result, &whales).is_empty());
     }
 }
