@@ -68,8 +68,13 @@ impl PumpFunExecutor {
     }
 
     /// Derive the associated bonding curve token account.
+    /// PumpFun uses Token-2022 since late 2024.
     fn derive_associated_bonding_curve(&self, bonding_curve: &Pubkey, mint: &Pubkey) -> Pubkey {
-        spl_associated_token_account::get_associated_token_address(bonding_curve, mint)
+        spl_associated_token_account::get_associated_token_address_with_program_id(
+            bonding_curve,
+            mint,
+            &tx_utils::token_2022_program_id(),
+        )
     }
 
     fn build_accounts(
@@ -156,7 +161,7 @@ impl DexExecutor for PumpFunExecutor {
 
         // Idempotent ATA creation — no-op if already exists (1 ix, not 2)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint));
+        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &tx_utils::token_2022_program_id()));
         ixs.push(ix);
 
         Ok((ixs, 0))

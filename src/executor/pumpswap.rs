@@ -86,13 +86,17 @@ impl PumpSwapExecutor {
         pool: &Pubkey,
     ) -> Vec<AccountMeta> {
         let user_base_ata =
-            spl_associated_token_account::get_associated_token_address(payer, base_mint);
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                payer, base_mint, &tx_utils::token_2022_program_id(),
+            );
         let user_quote_ata =
             spl_associated_token_account::get_associated_token_address(payer, quote_mint);
 
         // Pool token accounts are ATAs of the pool PDA
         let pool_base_ata =
-            spl_associated_token_account::get_associated_token_address(pool, base_mint);
+            spl_associated_token_account::get_associated_token_address_with_program_id(
+                pool, base_mint, &tx_utils::token_2022_program_id(),
+            );
         let pool_quote_ata =
             spl_associated_token_account::get_associated_token_address(pool, quote_mint);
 
@@ -105,7 +109,8 @@ impl PumpSwapExecutor {
                 quote_mint,
             );
 
-        let token_program = spl_token::id();
+        let base_token_program = tx_utils::token_2022_program_id();
+        let quote_token_program = spl_token::id();
         let associated_token_program = spl_associated_token_account::id();
 
         // Coin creator vault (PumpSwap-specific)
@@ -131,8 +136,8 @@ impl PumpSwapExecutor {
             AccountMeta::new(pool_quote_ata, false),
             AccountMeta::new(protocol_fee_recipient, false),
             AccountMeta::new(protocol_fee_recipient_ata, false),
-            AccountMeta::new_readonly(token_program, false),
-            AccountMeta::new_readonly(token_program, false), // quote_token_program
+            AccountMeta::new_readonly(base_token_program, false),
+            AccountMeta::new_readonly(quote_token_program, false),
             AccountMeta::new_readonly(system_program::ID, false),
             AccountMeta::new_readonly(associated_token_program, false),
             AccountMeta::new_readonly(event_authority, false),
@@ -172,7 +177,7 @@ impl DexExecutor for PumpSwapExecutor {
 
         // Create ATA (idempotent — no-op if exists)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint));
+        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &tx_utils::token_2022_program_id()));
         ixs.push(ix);
 
         Ok((ixs, 0))

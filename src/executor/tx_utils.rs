@@ -284,15 +284,24 @@ pub fn max_input_after_slippage(amount: u64, slippage_bps: u16) -> u64 {
 /// SPL Associated Token Account program ID.
 const ATA_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 
+/// Token-2022 program ID (Token Extensions).
+const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+
 /// Build an idempotent create-ATA instruction (no-op if already exists).
+///
+/// `token_program_id` should be `spl_token::id()` for legacy tokens or
+/// `TOKEN_2022_PROGRAM_ID` for Token-2022 tokens. PumpFun/PumpSwap tokens
+/// use Token-2022 since late 2024.
 pub fn create_ata_idempotent_ix(
     payer: &Pubkey,
     owner: &Pubkey,
     mint: &Pubkey,
+    token_program_id: &Pubkey,
 ) -> Instruction {
-    let ata = spl_associated_token_account::get_associated_token_address(owner, mint);
+    let ata = spl_associated_token_account::get_associated_token_address_with_program_id(
+        owner, mint, token_program_id,
+    );
     let ata_program: Pubkey = ATA_PROGRAM_ID.parse().unwrap();
-    let token_program = spl_token::id();
     let system_program = solana_sdk::system_program::id();
 
     Instruction {
@@ -303,10 +312,15 @@ pub fn create_ata_idempotent_ix(
             AccountMeta::new_readonly(*owner, false),
             AccountMeta::new_readonly(*mint, false),
             AccountMeta::new_readonly(system_program, false),
-            AccountMeta::new_readonly(token_program, false),
+            AccountMeta::new_readonly(*token_program_id, false),
         ],
         data: vec![1], // CreateIdempotent
     }
+}
+
+/// Get the Token-2022 program ID.
+pub fn token_2022_program_id() -> Pubkey {
+    TOKEN_2022_PROGRAM_ID.parse().unwrap()
 }
 
 // ---------------------------------------------------------------------------

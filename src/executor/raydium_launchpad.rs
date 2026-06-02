@@ -174,7 +174,7 @@ impl DexExecutor for RaydiumLaunchpadExecutor {
 
         // Create user token ATA (idempotent — no-op if exists)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint));
+        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &spl_token::id()));
         ixs.push(ix);
 
         Ok((ixs, minimum_amount_out))
