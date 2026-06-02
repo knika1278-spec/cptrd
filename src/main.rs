@@ -204,7 +204,8 @@ fn process_group(
                     "executing copy trade"
                 );
 
-                let result = tokio::runtime::Handle::current().block_on(async {
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
                     executor::execute_copy_trade(
                         &ctx.rpc_url,
                         &ctx.keypair,
@@ -220,6 +221,7 @@ fn process_group(
                         ctx.jito_tip_lamports,
                     )
                     .await
+                    })
                 });
 
                 match result {
