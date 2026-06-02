@@ -21,7 +21,11 @@ pub fn resolved_account_keys(result: &TxResult) -> Vec<String> {
     let message = &result.transaction.transaction.message;
     let meta = &result.transaction.meta;
 
-    let mut keys: Vec<String> = message.account_keys.iter().map(|k| k.pubkey.clone()).collect();
+    let mut keys: Vec<String> = message
+        .account_keys
+        .iter()
+        .map(|k| k.pubkey.clone())
+        .collect();
 
     if let Some(loaded) = &meta.loaded_addresses {
         keys.extend(loaded.writable.iter().cloned());
@@ -61,6 +65,28 @@ pub fn sol_lamport_delta(meta: &TxMeta, account_index: usize) -> Option<i64> {
     // lamports are bounded well below i64::MAX, so narrowing is safe.
     let delta = (*post as i128) - (*pre as i128);
     Some(delta as i64)
+}
+
+/// Net SOL the `owner` (at `account_index` in the resolved key list) moved in a tx, in lamports
+/// (signed; negative = net spent). Returns the larger-in-magnitude of the native lamport delta and the
+/// WSOL token delta (WSOL has 9 decimals, so its raw token delta is already lamports). AMMs route SOL as
+/// wrapped SOL while bonding curves use native SOL, and neither signal alone is reliable, so we pick the
+/// dominant one. None if neither signal is available.
+pub fn sol_movement_lamports(meta: &TxMeta, account_index: usize, owner: &str) -> Option<i64> {
+    let native = sol_lamport_delta(meta, account_index);
+    let wsol = wsol_delta_for_owner(meta, owner);
+    match (native, wsol) {
+        (None, None) => None,
+        (Some(n), None) => Some(n),
+        (None, Some(w)) => i64::try_from(w).ok(),
+        (Some(n), Some(w)) => {
+            if w.unsigned_abs() > (n as i128).unsigned_abs() {
+                i64::try_from(w).ok()
+            } else {
+                Some(n)
+            }
+        }
+    }
 }
 
 /// Parse a token amount from the decimal `amount` STRING (not the float
@@ -165,7 +191,13 @@ mod tests {
         }
     }
 
-    fn token_balance(index: u64, mint: &str, owner: &str, amount: &str, decimals: u8) -> TokenBalance {
+    fn token_balance(
+        index: u64,
+        mint: &str,
+        owner: &str,
+        amount: &str,
+        decimals: u8,
+    ) -> TokenBalance {
         TokenBalance {
             account_index: index,
             mint: mint.to_string(),
@@ -278,6 +310,78 @@ mod tests {
         meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "9000000000", 9)];
         meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "5000000000", 9)];
         assert_eq!(wsol_delta_for_owner(&meta, owner), Some(-4_000_000_000));
+    }
+
+    #[test]
+    fn sol_movement_returns_native_when_no_wsol() {
+        let mut meta = empty_meta();
+        meta.pre_balances = vec![10_000_000_000];
+        meta.post_balances = vec![6_500_000_000];
+        // No WSOL balance for the owner → native delta wins by default.
+        assert_eq!(
+            sol_movement_lamports(&meta, 0, "Whale1"),
+            Some(-3_500_000_000)
+        );
+    }
+
+    #[test]
+    fn sol_movement_returns_wsol_when_no_native() {
+        let owner = "Whale1";
+        let mut meta = empty_meta();
+        // Balance arrays empty → native is None; only WSOL movement present.
+        meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "9000000000", 9)];
+        meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "5000000000", 9)];
+        assert_eq!(
+            sol_movement_lamports(&meta, 0, owner),
+            Some(-4_000_000_000)
+        );
+    }
+
+    #[test]
+    fn sol_movement_picks_wsol_when_larger_magnitude() {
+        let owner = "Whale1";
+        let mut meta = empty_meta();
+        // Native delta is only a tiny fee; WSOL routes the real SOL (AMM trade).
+        meta.pre_balances = vec![1_000_000_000];
+        meta.post_balances = vec![999_995_000]; // -5_000 fee
+        meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "3000000000", 9)];
+        meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "1000000000", 9)];
+        // WSOL delta = -2_000_000_000, magnitude beats -5_000.
+        assert_eq!(
+            sol_movement_lamports(&meta, 0, owner),
+            Some(-2_000_000_000)
+        );
+    }
+
+    #[test]
+    fn sol_movement_picks_native_when_larger_magnitude() {
+        let owner = "Whale1";
+        let mut meta = empty_meta();
+        // Bonding curve: native SOL is the real movement; WSOL barely moves.
+        meta.pre_balances = vec![10_000_000_000];
+        meta.post_balances = vec![6_500_000_000]; // -3_500_000_000
+        meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "1000", 9)];
+        meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "0", 9)];
+        // Native magnitude (3.5e9) beats WSOL (-1_000).
+        assert_eq!(
+            sol_movement_lamports(&meta, 0, owner),
+            Some(-3_500_000_000)
+        );
+    }
+
+    #[test]
+    fn sol_movement_preserves_positive_sign_on_sell() {
+        let owner = "Whale1";
+        let mut meta = empty_meta();
+        // Sell side: WSOL received (positive) dominates the small native fee.
+        meta.pre_balances = vec![1_000_000_000];
+        meta.post_balances = vec![999_995_000]; // -5_000 fee
+        meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "0", 9)];
+        meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "2000000000", 9)];
+        assert_eq!(
+            sol_movement_lamports(&meta, 0, owner),
+            Some(2_000_000_000)
+        );
     }
 
     #[test]
