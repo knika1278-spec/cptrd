@@ -14,6 +14,8 @@ use crate::models::types::{DecodedTradeEvent, TxResult, UiInstruction};
 /// instruction's program id. Returns the first successfully-decoded trade event, or None if no DEX
 /// instruction in the transaction decodes. Disambiguation is by PROGRAM_ID (PumpFun/PumpSwap and
 /// DLMM/DAMM share discriminators) — see docs/dex-reference.md §0.
+// Single-event routing API retained for callers/tests; Phase 1 production path uses `route_all`.
+#[allow(dead_code)]
 pub fn route(result: &TxResult, whales: &HashSet<String>) -> Option<DecodedTradeEvent> {
     all_instructions(result)
         .into_iter()
@@ -115,10 +117,7 @@ mod tests {
 
     /// Build a `TxResult` from explicit top-level + inner instructions and a buy-shaped balance set
     /// (3.5 SOL spent, MINT 0 -> 1_000_000) so DEX instructions decode.
-    fn build_result(
-        top_level: Vec<UiInstruction>,
-        inner: Vec<UiInstruction>,
-    ) -> TxResult {
+    fn build_result(top_level: Vec<UiInstruction>, inner: Vec<UiInstruction>) -> TxResult {
         let inner_instructions = if inner.is_empty() {
             vec![]
         } else {

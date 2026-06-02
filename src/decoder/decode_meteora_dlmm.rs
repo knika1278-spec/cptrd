@@ -81,7 +81,8 @@ pub fn decode(
     //    discriminator. Negative = trader spent SOL/WSOL (Buy); positive =
     //    trader received SOL/WSOL (Sell). Zero net movement can't be classified
     //    (likely a token↔token swap) → out of scope.
-    let sol_lamports = common::sol_movement_lamports(&result.transaction.meta, trader_idx, &trader)?;
+    let sol_lamports =
+        common::sol_movement_lamports(&result.transaction.meta, trader_idx, &trader)?;
     let action = if sol_lamports < 0 {
         TradeAction::Buy
     } else if sol_lamports > 0 {

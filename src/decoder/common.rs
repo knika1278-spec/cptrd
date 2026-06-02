@@ -17,6 +17,8 @@ pub const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 /// Order: static `message.account_keys`, then `meta.loaded_addresses.writable`,
 /// then `.readonly`. This index space aligns with `meta.pre/post_balances` and
 /// with `TokenBalance.account_index`.
+// Wire-shape helper retained for tests/future consumers; not used on the Phase 1 decode path.
+#[allow(dead_code)]
 pub fn resolved_account_keys(result: &TxResult) -> Vec<String> {
     let message = &result.transaction.transaction.message;
     let meta = &result.transaction.meta;
@@ -331,10 +333,7 @@ mod tests {
         // Balance arrays empty → native is None; only WSOL movement present.
         meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "9000000000", 9)];
         meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "5000000000", 9)];
-        assert_eq!(
-            sol_movement_lamports(&meta, 0, owner),
-            Some(-4_000_000_000)
-        );
+        assert_eq!(sol_movement_lamports(&meta, 0, owner), Some(-4_000_000_000));
     }
 
     #[test]
@@ -347,10 +346,7 @@ mod tests {
         meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "3000000000", 9)];
         meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "1000000000", 9)];
         // WSOL delta = -2_000_000_000, magnitude beats -5_000.
-        assert_eq!(
-            sol_movement_lamports(&meta, 0, owner),
-            Some(-2_000_000_000)
-        );
+        assert_eq!(sol_movement_lamports(&meta, 0, owner), Some(-2_000_000_000));
     }
 
     #[test]
@@ -363,10 +359,7 @@ mod tests {
         meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "1000", 9)];
         meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "0", 9)];
         // Native magnitude (3.5e9) beats WSOL (-1_000).
-        assert_eq!(
-            sol_movement_lamports(&meta, 0, owner),
-            Some(-3_500_000_000)
-        );
+        assert_eq!(sol_movement_lamports(&meta, 0, owner), Some(-3_500_000_000));
     }
 
     #[test]
@@ -378,10 +371,7 @@ mod tests {
         meta.post_balances = vec![999_995_000]; // -5_000 fee
         meta.pre_token_balances = vec![token_balance(0, WSOL_MINT, owner, "0", 9)];
         meta.post_token_balances = vec![token_balance(0, WSOL_MINT, owner, "2000000000", 9)];
-        assert_eq!(
-            sol_movement_lamports(&meta, 0, owner),
-            Some(2_000_000_000)
-        );
+        assert_eq!(sol_movement_lamports(&meta, 0, owner), Some(2_000_000_000));
     }
 
     #[test]

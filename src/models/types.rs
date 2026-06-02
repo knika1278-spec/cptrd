@@ -75,9 +75,13 @@ pub struct DecodedTradeEvent {
 // ---------------------------------------------------------------------------
 // B. Helius `transactionSubscribe` notification (jsonParsed) — §1 contract
 // ---------------------------------------------------------------------------
+// The structs below are parsed from the Helius wire format; not all fields are
+// consumed in Phase 1 but they document the wire contract and keep the
+// deserialization shape correct, so they carry targeted `#[allow(dead_code)]`.
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct HeliusNotification {
     pub jsonrpc: String,
     pub method: String,
@@ -86,6 +90,7 @@ pub struct HeliusNotification {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct NotificationParams {
     pub subscription: u64,
     pub result: TxResult,
@@ -121,6 +126,7 @@ pub struct TxMessage {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct AccountKey {
     pub pubkey: String,
     pub signer: bool,
@@ -132,6 +138,7 @@ pub struct AccountKey {
 /// our DEX programs. All fields are optional so both shapes deserialize.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct UiInstruction {
     #[serde(default)]
     pub program_id: Option<String>,
@@ -154,6 +161,7 @@ impl UiInstruction {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct TxMeta {
     pub err: Option<serde_json::Value>,
     pub fee: u64,
@@ -173,6 +181,7 @@ pub struct TxMeta {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct TokenBalance {
     pub account_index: u64,
     pub mint: String,
@@ -182,6 +191,7 @@ pub struct TokenBalance {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct UiTokenAmount {
     pub amount: String,
     pub decimals: u8,
@@ -190,6 +200,7 @@ pub struct UiTokenAmount {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct InnerInstructions {
     pub index: u32,
     pub instructions: Vec<UiInstruction>,
@@ -197,6 +208,7 @@ pub struct InnerInstructions {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct LoadedAddresses {
     pub writable: Vec<String>,
     pub readonly: Vec<String>,
@@ -355,6 +367,9 @@ mod tests {
         assert_eq!(post.mint, "Mint1111111111111111111111111111111111111111");
         assert_eq!(post.ui_token_amount.decimals, 6);
         assert_eq!(post.ui_token_amount.amount, "1000000");
-        assert_eq!(post.owner.as_deref(), Some("WhaleTrader1111111111111111111111111111111"));
+        assert_eq!(
+            post.owner.as_deref(),
+            Some("WhaleTrader1111111111111111111111111111111")
+        );
     }
 }
