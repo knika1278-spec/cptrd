@@ -5,6 +5,7 @@ Cargo.lock
 # Secrets & local config
 .env
 .env.*
+!.env.example
 config/whales.json
 
 # Generated output
