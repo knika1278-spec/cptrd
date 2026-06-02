@@ -63,7 +63,7 @@ pub fn decode(
     // misreport. A delta exceeding u64 is a non-trade artifact → skip.
     let token_amount = u64::try_from(tok_delta.unsigned_abs()).ok()?;
 
-    let lamports = common::sol_lamport_delta(&result.transaction.meta, trader_idx)?;
+    let lamports = common::sol_movement_lamports(&result.transaction.meta, trader_idx, &trader)?;
     let sol_amount = (lamports.unsigned_abs() as f64) / 1_000_000_000.0;
 
     // 5. Build the event. is_bot_whale/passed_threshold/guard_skip_reason/

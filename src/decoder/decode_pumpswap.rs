@@ -57,7 +57,7 @@ pub fn decode(
     // misreport. A delta exceeding u64 is a non-trade artifact → skip.
     let token_amount = u64::try_from(tok_delta.unsigned_abs()).ok()?;
 
-    let lamports = common::sol_lamport_delta(&result.transaction.meta, trader_idx)?;
+    let lamports = common::sol_movement_lamports(&result.transaction.meta, trader_idx, &trader)?;
     let sol_amount = (lamports.unsigned_abs() as f64) / 1_000_000_000.0;
 
     // 5. Build the event. is_bot_whale/passed_threshold/guard_skip_reason/
@@ -187,6 +187,35 @@ mod tests {
         assert_eq!(event.slot, 987_654_321);
         // Conservative sentinel: the guard layer sets this definitively later.
         assert!(!event.passed_threshold);
+    }
+
+    #[test]
+    fn buy_uses_wsol_delta_when_native_is_only_fee() {
+        // WSOL-routed AMM buy: native balance moves only by a tiny fee (-5_000),
+        // but the trader's WSOL token balance drops 3.0 -> 1.0 SOL (-2 SOL). The
+        // robust helper must pick the WSOL delta, not the fee-sized native delta.
+        let result = build_result(
+            vec![1_000_000_000, 0],
+            vec![999_995_000, 0], // -5_000 lamports (fee only)
+            vec![
+                token_balance(MINT, TRADER, "0", 6),
+                token_balance(common::WSOL_MINT, TRADER, "3000000000", 9),
+            ],
+            vec![
+                token_balance(MINT, TRADER, "1000000", 6),
+                token_balance(common::WSOL_MINT, TRADER, "1000000000", 9),
+            ],
+        );
+        let whales: HashSet<String> = HashSet::new();
+
+        let event = decode(&result, &instruction(&DISC_BUY), &whales).expect("buy decodes");
+
+        assert_eq!(event.action, TradeAction::Buy);
+        assert_eq!(event.dex, DexProtocol::PumpSwap);
+        assert_eq!(event.mint, MINT);
+        assert_eq!(event.token_amount, 1_000_000);
+        // WSOL delta (-2 SOL) dominates the fee-sized native delta (-5_000).
+        assert_eq!(event.sol_amount, 2.0);
     }
 
     #[test]
