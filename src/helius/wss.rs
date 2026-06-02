@@ -112,14 +112,15 @@ pub async fn run(
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
-        match connect_once(&url, &accounts, &whales, &sender).await {
+        // `connect_once` resets `backoff` to INITIAL the moment it achieves a live
+        // subscribed session, so any later disconnect backs off from 1s again. Only
+        // failed connect attempts (never reached a live session) keep the grown value.
+        match connect_once(&url, &accounts, &whales, &sender, &mut backoff).await {
             ConnectionOutcome::ReceiverClosed => {
                 tracing::info!("event receiver closed; stopping Helius WSS client");
                 return Ok(());
             }
             ConnectionOutcome::Disconnected => {
-                // A clean connect happened (backoff already reset inside); a normal
-                // disconnect just retries immediately at the reset interval.
                 tracing::warn!("Helius WSS disconnected; reconnecting in {:?}", backoff);
             }
             ConnectionOutcome::Failed => {
@@ -128,8 +129,8 @@ pub async fn run(
         }
 
         tokio::time::sleep(backoff).await;
-        // Double on each failed attempt up to the cap. A successful connect resets
-        // `backoff` to INITIAL inside `connect_once` via the returned outcome below.
+        // Double up to the cap for the NEXT attempt. A live session already reset
+        // `backoff` to INITIAL inside `connect_once`, so this only grows on failures.
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
@@ -145,12 +146,15 @@ enum ConnectionOutcome {
 }
 
 /// One connection lifecycle: connect, subscribe, then pump messages until the
-/// stream ends. Reset-on-success is signaled to the caller via the outcome.
+/// stream ends. On a successful connect+subscribe (a live session), resets
+/// `backoff` to [`INITIAL_BACKOFF`] so a later disconnect backs off from 1s again;
+/// failed connect/subscribe attempts leave `backoff` untouched so it keeps growing.
 async fn connect_once(
     url: &str,
     accounts: &[String],
     whales: &HashSet<String>,
     sender: &UnboundedSender<DecodedTradeEvent>,
+    backoff: &mut Duration,
 ) -> ConnectionOutcome {
     tracing::info!("connecting to Helius WSS endpoint: {}", url);
 
@@ -169,6 +173,9 @@ async fn connect_once(
         tracing::error!("Helius WSS subscribe send error: {}", err);
         return ConnectionOutcome::Failed;
     }
+    // Live subscribed session achieved — reset backoff so a later disconnect starts
+    // fresh at 1s rather than at whatever value prior failed attempts grew it to.
+    *backoff = INITIAL_BACKOFF;
     tracing::info!(
         "subscribed to transactionSubscribe for {} whale account(s)",
         accounts.len()
