@@ -57,7 +57,10 @@ pub fn find_trader(msg: &TxMessage, whales: &HashSet<String>) -> Option<(usize, 
 pub fn sol_lamport_delta(meta: &TxMeta, account_index: usize) -> Option<i64> {
     let pre = meta.pre_balances.get(account_index)?;
     let post = meta.post_balances.get(account_index)?;
-    Some(*post as i64 - *pre as i64)
+    // Subtract in i128 so an out-of-range `pre` can't flip the delta's sign;
+    // lamports are bounded well below i64::MAX, so narrowing is safe.
+    let delta = (*post as i128) - (*pre as i128);
+    Some(delta as i64)
 }
 
 /// Parse a token amount from the decimal `amount` STRING (not the float
@@ -137,9 +140,7 @@ pub fn traded_mint_for_owner(meta: &TxMeta, owner: &str) -> Option<(String, i128
 /// discriminator). `None` if decode fails or fewer than 8 bytes are present.
 pub fn discriminator(data_base58: &str) -> Option<[u8; 8]> {
     let bytes = bs58::decode(data_base58).into_vec().ok()?;
-    let head = bytes.get(0..8)?;
-    let mut disc = [0u8; 8];
-    disc.copy_from_slice(head);
+    let disc: [u8; 8] = bytes.get(0..8)?.try_into().ok()?;
     Some(disc)
 }
 
@@ -239,6 +240,16 @@ mod tests {
         meta.pre_token_balances = vec![token_balance(0, mint, owner, "5000000", 9)];
         meta.post_token_balances = vec![token_balance(0, mint, owner, "1000000", 9)];
         assert_eq!(token_delta(&meta, owner, mint), Some((-4_000_000, 9)));
+    }
+
+    #[test]
+    fn token_delta_with_only_post_treats_missing_pre_as_zero() {
+        let owner = "Whale1";
+        let mint = "Mint1";
+        let mut meta = empty_meta();
+        // New ATA / first buy: no matching pre entry, only post.
+        meta.post_token_balances = vec![token_balance(0, mint, owner, "1000000", 6)];
+        assert_eq!(token_delta(&meta, owner, mint), Some((1_000_000, 6)));
     }
 
     #[test]
