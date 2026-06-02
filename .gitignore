@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Secrets & local config
+.env
+.env.*
+config/whales.json
+
+# Generated output
+/output/*.json
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
