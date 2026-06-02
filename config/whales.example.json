@@ -1,0 +1,15 @@
+{
+  "helius_api_key": "YOUR_HELIUS_API_KEY_HERE",
+  "helius_wss_url": "wss://atlas-mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_API_KEY_HERE",
+  "min_sol_threshold": 2.0,
+  "whales": [
+    {
+      "address": "REPLACE_WITH_WHALE_PUBKEY_1",
+      "label": "whale-alpha"
+    },
+    {
+      "address": "REPLACE_WITH_WHALE_PUBKEY_2",
+      "label": "whale-beta"
+    }
+  ]
+}
