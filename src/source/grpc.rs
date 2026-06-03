@@ -21,9 +21,9 @@
 //!    ```
 //! 3. Run the bot — it will connect via gRPC instead of WSS
 
+use crate::models::types::{BotConfig, DecodedTradeEvent};
 use std::collections::HashSet;
 use tokio::sync::mpsc::UnboundedSender;
-use crate::models::types::{BotConfig, DecodedTradeEvent};
 
 /// Run the Yellowstone gRPC source.
 ///
@@ -34,8 +34,7 @@ pub async fn run(
     _whales: HashSet<String>,
     _sender: UnboundedSender<Vec<DecodedTradeEvent>>,
 ) -> anyhow::Result<()> {
-    let grpc_url = std::env::var("GRPC_URL")
-        .unwrap_or_default();
+    let grpc_url = std::env::var("GRPC_URL").unwrap_or_default();
 
     if grpc_url.is_empty() {
         anyhow::bail!(

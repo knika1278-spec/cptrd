@@ -6,12 +6,12 @@
 //!
 //! Mode is selected via `MODE` env var: `WSS` (default) or `GRPC`.
 
-pub mod wss;
 pub mod grpc;
+pub mod wss;
 
+use crate::models::types::{BotConfig, DecodedTradeEvent};
 use std::collections::HashSet;
 use tokio::sync::mpsc::UnboundedSender;
-use crate::models::types::{BotConfig, DecodedTradeEvent};
 
 /// Transaction source mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,11 @@ pub enum SourceMode {
 impl SourceMode {
     /// Parse from env var string.
     pub fn from_env() -> Self {
-        match std::env::var("MODE").unwrap_or_default().to_uppercase().as_str() {
+        match std::env::var("MODE")
+            .unwrap_or_default()
+            .to_uppercase()
+            .as_str()
+        {
             "GRPC" | "YELLOWSTONE" | "SHREDSTREAM" => Self::Grpc,
             _ => Self::Wss,
         }

@@ -3,29 +3,45 @@
 //!
 //! Builds buy/sell instructions for the PumpSwap AMM program.
 //!
+//! Strategy: copy ALL accounts from the whale's decoded instruction (via
+//! `params.ix_accounts`) and substitute only the user-specific accounts
+//! (user wallet, user ATAs, user_volume_accumulator). This avoids fragile
+//! hardcoded addresses that break when the IDL evolves.
+//!
 //! Source: official IDL `github.com/pump-fun/pump-public-docs/idl/pump_amm.json`
 //! and `docs/dex-reference.md` §3.
 //!
-//! # Instruction Layout
+//! # Account Layout (from IDL, 2026-06-03)
 //!
-//! ## Buy
-//! - Discriminator: `[102, 6, 61, 18, 1, 218, 235, 234]` (same as PumpFun)
-//! - Args: `base_amount_out: u64`, `max_quote_amount_in: u64`, `track_volume: Option<bool>`
-//! - Accounts: pool, user (trader), global_config, base_mint, quote_mint,
-//!   user_base_token_account, user_quote_token_account, pool_base_token_account,
-//!   pool_quote_token_account, protocol_fee_recipient, protocol_fee_recipient_token_account,
-//!   base_token_program, quote_token_program, system_program, associated_token_program,
-//!   event_authority, program, coin_creator_vault_ata, coin_creator_vault_authority
-//!
-//! ## Sell
-//! - Discriminator: `[51, 230, 133, 164, 1, 127, 131, 173]` (same as PumpFun)
-//! - Args: `base_amount_in: u64`, `min_quote_amount_out: u64`
-//! - Same accounts as buy
+//! | idx | account                                | writable | substitute? |
+//! |-----|----------------------------------------|----------|-------------|
+//! |  0  | pool                                   | yes      | no          |
+//! |  1  | user (trader)                          | yes      | YES         |
+//! |  2  | global_config                          | no       | no          |
+//! |  3  | base_mint (token)                      | no       | no          |
+//! |  4  | quote_mint (WSOL)                      | no       | no          |
+//! |  5  | user_base_token_account                | yes      | YES         |
+//! |  6  | user_quote_token_account               | yes      | YES         |
+//! |  7  | pool_base_token_account                | yes      | no          |
+//! |  8  | pool_quote_token_account               | yes      | no          |
+//! |  9  | protocol_fee_recipient                 | no       | no          |
+//! | 10  | protocol_fee_recipient_token_account   | yes      | no          |
+//! | 11  | base_token_program                     | no       | no          |
+//! | 12  | quote_token_program                    | no       | no          |
+//! | 13  | system_program                         | no       | no          |
+//! | 14  | associated_token_program               | no       | no          |
+//! | 15  | event_authority                        | no       | no          |
+//! | 16  | program (self)                         | no       | no          |
+//! | 17  | coin_creator_vault_ata                 | yes      | no          |
+//! | 18  | coin_creator_vault_authority           | no       | no          |
+//! | 19  | global_volume_accumulator (buy only)   | no       | no          |
+//! | 20  | user_volume_accumulator (buy only)     | yes      | YES         |
+//! | 21  | fee_config (buy idx 21 / sell idx 19)  | no       | no          |
+//! | 22  | fee_program  (buy idx 22 / sell idx 20)| no       | no          |
 
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    system_program,
 };
 
 use super::{tx_utils, DexExecutor, ExecutorError, TradeParams};
@@ -37,10 +53,15 @@ const PROGRAM_ID: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 const DISC_BUY: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
 const DISC_SELL: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 
-/// Well-known PumpSwap accounts.
-const GLOBAL_CONFIG: &str = "8pTAg7BqoXjE6zJzBKFD8D7G1G8FxLxMKh7AE9N1jxw";
-const EVENT_AUTHORITY: &str = "GS4CU59F31iL7oaRvzYfpbKzEa6jV1YZ1z3FqrmYFJk4";
-const PROTOCOL_FEE_RECIPIENT: &str = "68yFSZbGTCHkx9UBaEsK3ZmHQ2Zsx4UNMbh6LqKJ1yoN";
+/// Minimum expected accounts for a PumpSwap instruction (sell has fewer).
+const MIN_ACCOUNTS: usize = 19;
+
+/// Account indices that must be substituted with our own.
+const IDX_USER: usize = 1;
+const IDX_USER_BASE_ATA: usize = 5;
+const IDX_USER_QUOTE_ATA: usize = 6;
+/// User volume accumulator is only in buy (index 20). Sell doesn't have it.
+const IDX_USER_VOLUME_ACCUMULATOR_BUY: usize = 20;
 
 /// PumpSwap AMM executor.
 pub struct PumpSwapExecutor {
@@ -54,97 +75,70 @@ impl PumpSwapExecutor {
         }
     }
 
-    /// Derive the pool PDA for a base/quote mint pair.
-    ///
-    /// Seeds: ["pool", creator.as_ref(), base_mint.as_ref(), quote_mint.as_ref()]
-    /// In practice, pool accounts are discoverable on-chain. For now we derive
-    /// using a common creator or use the pool directly if known.
-    fn derive_pool(&self, base_mint: &Pubkey, quote_mint: &Pubkey) -> Pubkey {
-        // PumpSwap pools are created by a known pool creator.
-        // The PDA seeds vary; for now we use a deterministic derivation.
-        // In production, this should be fetched from an indexer or on-chain lookup.
-        let pool_creator: Pubkey = "FFWtrEQ4B4PKQoVuH3iBgoT6UBPSURRgCoWqC6Lj6m8R"
-            .parse()
-            .unwrap();
-        let (pda, _bump) = Pubkey::find_program_address(
-            &[
-                b"pool",
-                pool_creator.as_ref(),
-                base_mint.as_ref(),
-                quote_mint.as_ref(),
-            ],
-            &self.program_id,
-        );
-        pda
-    }
-
-    fn build_accounts(
+    /// Build the instruction accounts by taking the whale's accounts and
+    /// substituting user-specific entries (user wallet, user ATAs, user vol).
+    fn build_accounts_from_whale(
         &self,
         payer: &Pubkey,
         base_mint: &Pubkey,
-        quote_mint: &Pubkey,
-        pool: &Pubkey,
-    ) -> Vec<AccountMeta> {
+        whale_accounts: &[Pubkey],
+        is_buy: bool,
+    ) -> Result<Vec<AccountMeta>, ExecutorError> {
+        if whale_accounts.len() < MIN_ACCOUNTS {
+            return Err(ExecutorError::InvalidAccount(format!(
+                "PumpSwap whale accounts too short: {} (need >= {})",
+                whale_accounts.len(),
+                MIN_ACCOUNTS,
+            )));
+        }
+
+        // Derive our user-specific accounts
         let user_base_ata =
             spl_associated_token_account::get_associated_token_address_with_program_id(
-                payer, base_mint, &tx_utils::token_2022_program_id(),
+                payer,
+                base_mint,
+                &tx_utils::token_2022_program_id(),
             );
+        let quote_mint = whale_accounts[4]; // WSOL
         let user_quote_ata =
-            spl_associated_token_account::get_associated_token_address(payer, quote_mint);
+            spl_associated_token_account::get_associated_token_address(payer, &quote_mint);
 
-        // Pool token accounts are ATAs of the pool PDA
-        let pool_base_ata =
-            spl_associated_token_account::get_associated_token_address_with_program_id(
-                pool, base_mint, &tx_utils::token_2022_program_id(),
-            );
-        let pool_quote_ata =
-            spl_associated_token_account::get_associated_token_address(pool, quote_mint);
+        // Clone the whale accounts and substitute user-specific ones
+        let mut accounts: Vec<AccountMeta> = whale_accounts
+            .iter()
+            .enumerate()
+            .map(|(i, pk)| {
+                // Determine writable/signer based on the known layout
+                let (writable, signer) = match i {
+                    0 | 5 | 6 | 7 | 8 | 10 | 17 => (true, false), // pool, user ATAs, pool ATAs, fee_recip_ata, creator_vault_ata
+                    1 => (true, true),                            // user (signer)
+                    _ if is_buy && i == 20 => (true, false),      // user_volume_accumulator (buy)
+                    _ => (false, false),                          // everything else is readonly
+                };
+                AccountMeta {
+                    pubkey: *pk,
+                    is_signer: signer,
+                    is_writable: writable,
+                }
+            })
+            .collect();
 
-        let global_config: Pubkey = GLOBAL_CONFIG.parse().unwrap();
-        let event_authority: Pubkey = EVENT_AUTHORITY.parse().unwrap();
-        let protocol_fee_recipient: Pubkey = PROTOCOL_FEE_RECIPIENT.parse().unwrap();
-        let protocol_fee_recipient_ata =
-            spl_associated_token_account::get_associated_token_address(
-                &protocol_fee_recipient,
-                quote_mint,
-            );
+        // Substitute user-specific accounts
+        accounts[IDX_USER].pubkey = *payer;
+        accounts[IDX_USER_BASE_ATA].pubkey = user_base_ata;
+        accounts[IDX_USER_QUOTE_ATA].pubkey = user_quote_ata;
 
-        let base_token_program = tx_utils::token_2022_program_id();
-        let quote_token_program = spl_token::id();
-        let associated_token_program = spl_associated_token_account::id();
+        // For buy: substitute user_volume_accumulator
+        if is_buy && whale_accounts.len() > IDX_USER_VOLUME_ACCUMULATOR_BUY {
+            let user_vol = Pubkey::find_program_address(
+                &[b"user_volume_accumulator", payer.as_ref()],
+                &self.program_id,
+            )
+            .0;
+            accounts[IDX_USER_VOLUME_ACCUMULATOR_BUY].pubkey = user_vol;
+        }
 
-        // Coin creator vault (PumpSwap-specific)
-        let coin_creator_vault_authority: Pubkey =
-            "3se2H6BsCwM8MdMNPSsMfCfUuFbP2wVE7wj6WwLkEJn6"
-                .parse()
-                .unwrap();
-        let coin_creator_vault_ata =
-            spl_associated_token_account::get_associated_token_address(
-                &coin_creator_vault_authority,
-                quote_mint,
-            );
-
-        vec![
-            AccountMeta::new(*pool, false),
-            AccountMeta::new(*payer, true),
-            AccountMeta::new_readonly(global_config, false),
-            AccountMeta::new(*base_mint, false),
-            AccountMeta::new(*quote_mint, false),
-            AccountMeta::new(user_base_ata, false),
-            AccountMeta::new(user_quote_ata, false),
-            AccountMeta::new(pool_base_ata, false),
-            AccountMeta::new(pool_quote_ata, false),
-            AccountMeta::new(protocol_fee_recipient, false),
-            AccountMeta::new(protocol_fee_recipient_ata, false),
-            AccountMeta::new_readonly(base_token_program, false),
-            AccountMeta::new_readonly(quote_token_program, false),
-            AccountMeta::new_readonly(system_program::ID, false),
-            AccountMeta::new_readonly(associated_token_program, false),
-            AccountMeta::new_readonly(event_authority, false),
-            AccountMeta::new_readonly(self.program_id, false),
-            AccountMeta::new(coin_creator_vault_ata, false),
-            AccountMeta::new_readonly(coin_creator_vault_authority, false),
-        ]
+        Ok(accounts)
     }
 }
 
@@ -158,11 +152,11 @@ impl DexExecutor for PumpSwapExecutor {
         payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
-            .parse()
-            .unwrap();
-        let pool = self.derive_pool(&params.mint, &quote_mint);
-        let accounts = self.build_accounts(payer, &params.mint, &quote_mint, &pool);
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound("PumpSwap buy requires ix_accounts from whale tx".into())
+        })?;
+
+        let accounts = self.build_accounts_from_whale(payer, &params.mint, whale_accounts, true)?;
 
         // For buys: base_amount_out = 0 (any), max_quote_amount_in = SOL with slippage
         let max_quote_in = tx_utils::max_input_after_slippage(params.amount, params.slippage_bps);
@@ -177,7 +171,12 @@ impl DexExecutor for PumpSwapExecutor {
 
         // Create ATA (idempotent — no-op if exists)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &tx_utils::token_2022_program_id()));
+        ixs.push(tx_utils::create_ata_idempotent_ix(
+            payer,
+            payer,
+            &params.mint,
+            &tx_utils::token_2022_program_id(),
+        ));
         ixs.push(ix);
 
         Ok((ixs, 0))
@@ -188,11 +187,12 @@ impl DexExecutor for PumpSwapExecutor {
         payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
-            .parse()
-            .unwrap();
-        let pool = self.derive_pool(&params.mint, &quote_mint);
-        let accounts = self.build_accounts(payer, &params.mint, &quote_mint, &pool);
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound("PumpSwap sell requires ix_accounts from whale tx".into())
+        })?;
+
+        let accounts =
+            self.build_accounts_from_whale(payer, &params.mint, whale_accounts, false)?;
 
         let min_quote_out = tx_utils::min_output_after_slippage(0, params.slippage_bps);
 

@@ -80,8 +80,8 @@ async fn main() -> anyhow::Result<()> {
                 rpc_url = %rpc_url,
                 "trade execution ENABLED"
             );
-            let keypair = executor::wallet::load_keypair()
-                .context("failed to load executor keypair")?;
+            let keypair =
+                executor::wallet::load_keypair().context("failed to load executor keypair")?;
             tracing::info!(
                 wallet = %keypair.pubkey(),
                 "executor wallet loaded"
@@ -111,9 +111,8 @@ async fn main() -> anyhow::Result<()> {
     let source_mode = source::SourceMode::from_env();
     tracing::info!(mode = ?source_mode, "transaction source mode");
 
-    let wss_handle = tokio::spawn(async move {
-        source::run(source_mode, config, whales, tx).await
-    });
+    let wss_handle =
+        tokio::spawn(async move { source::run(source_mode, config, whales, tx).await });
 
     tracing::info!(
         "copytrade pipeline started (min threshold {:.4} SOL)",
@@ -174,14 +173,6 @@ fn process_group(
     for event in events.iter_mut() {
         guard::threshold_filter::apply_threshold(event, min_threshold);
 
-        if let Err(err) = output::json_writer::write_event(event, output_dir) {
-            tracing::error!(
-                signature = %event.signature,
-                "failed to write event: {:#}",
-                err
-            );
-        }
-
         let skip = event.guard_skip_reason.as_deref().unwrap_or("-");
         tracing::info!(
             dex = ?event.dex,
@@ -206,32 +197,50 @@ fn process_group(
 
                 let result = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(async {
-                    executor::execute_copy_trade(
-                        &ctx.rpc_url,
-                        &ctx.keypair,
-                        &event.mint,
-                        event.action,
-                        event.dex,
-                        event.token_amount,
-                        &ctx.protocol_configs,
-                        ctx.priority_fee_microlamports,
-                        ctx.compute_unit_limit,
-                        &ctx.blockhash_cache,
-                        ctx.use_jito,
-                        ctx.jito_tip_lamports,
-                    )
-                    .await
+                        executor::execute_copy_trade(
+                            &ctx.rpc_url,
+                            &ctx.keypair,
+                            &event.mint,
+                            event.action,
+                            event.dex,
+                            event.token_amount,
+                            event.ix_accounts.clone(),
+                            &ctx.protocol_configs,
+                            ctx.priority_fee_microlamports,
+                            ctx.compute_unit_limit,
+                            &ctx.blockhash_cache,
+                            ctx.use_jito,
+                            ctx.jito_tip_lamports,
+                        )
+                        .await
                     })
                 });
 
                 match result {
                     Ok(exec_result) => {
-                        tracing::info!(
-                            tx = %exec_result.tx_signature,
-                            confirmed = exec_result.confirmed,
-                            "copy trade executed successfully"
-                        );
+                        // Success means CONFIRMED on-chain — a returned signature
+                        // alone is not success (the tx can be dropped).
+                        if exec_result.confirmed {
+                            tracing::info!(
+                                tx = %exec_result.tx_signature,
+                                "copy trade CONFIRMED on-chain"
+                            );
+                        } else {
+                            tracing::warn!(
+                                tx = %exec_result.tx_signature,
+                                reason = %exec_result.error.as_deref().unwrap_or("unconfirmed"),
+                                "copy trade NOT confirmed on-chain (not counted as success)"
+                            );
+                        }
+                        // Record either way so unconfirmed attempts are auditable.
                         event.execution = Some(exec_result);
+                    }
+                    // A deliberate skip (bot holds none of this mint), not a failure.
+                    Err(executor::ExecutorError::InsufficientTokenBalance { .. }) => {
+                        tracing::info!(
+                            mint = %event.mint,
+                            "skipped copy-sell: bot holds no tokens of this mint"
+                        );
                     }
                     Err(err) => {
                         tracing::error!(
@@ -243,6 +252,16 @@ fn process_group(
                     }
                 }
             }
+        }
+
+        // Persist AFTER execution so the bot's own buy/sell tx_signature
+        // (event.execution) is captured in the per-whale output file.
+        if let Err(err) = output::json_writer::write_event(event, output_dir) {
+            tracing::error!(
+                signature = %event.signature,
+                "failed to write event: {:#}",
+                err
+            );
         }
     }
 }

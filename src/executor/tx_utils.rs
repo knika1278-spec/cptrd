@@ -5,19 +5,20 @@
 //! - Fire-and-forget submission (no waiting for confirmation)
 //! - Jito bundle submission for MEV protection
 
-use std::sync::Arc;
+use base64::Engine;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     compute_budget::ComputeBudgetInstruction,
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
-    signature::Keypair,
+    signature::{Keypair, Signature},
     signer::Signer,
     transaction::Transaction,
 };
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
-use base64::Engine;
 
 use super::ExecutorError;
 use crate::models::types::ExecutionResult;
@@ -49,11 +50,10 @@ impl BlockhashCache {
         let rpc = RpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
 
         // Fetch initial blockhash
-        let blockhash = rpc.get_latest_blockhash()
-            .unwrap_or_else(|e| {
-                tracing::warn!("initial blockhash fetch failed: {e}, using default");
-                solana_sdk::hash::Hash::default()
-            });
+        let blockhash = rpc.get_latest_blockhash().unwrap_or_else(|e| {
+            tracing::warn!("initial blockhash fetch failed: {e}, using default");
+            solana_sdk::hash::Hash::default()
+        });
 
         let cache = Self {
             inner: Arc::new(RwLock::new(CachedBlockhash {
@@ -113,9 +113,13 @@ pub async fn submit_transaction(
 
     // Build compute budget instructions
     let mut all_ixs: Vec<Instruction> = Vec::with_capacity(instructions.len() + 2);
-    all_ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit));
+    all_ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(
+        compute_unit_limit,
+    ));
     if priority_fee_microlamports > 0 {
-        all_ixs.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee_microlamports));
+        all_ixs.push(ComputeBudgetInstruction::set_compute_unit_price(
+            priority_fee_microlamports,
+        ));
     }
     all_ixs.extend_from_slice(instructions);
 
@@ -137,31 +141,72 @@ pub async fn submit_transaction(
 
     let executed_at = chrono::Utc::now().to_rfc3339();
 
-    tracing::info!(
-        signature = %signature,
-        "transaction submitted (fire-and-forget)"
-    );
+    tracing::info!(signature = %signature, "transaction submitted; awaiting confirmation");
+
+    let (confirmed, error) = await_confirmation(&rpc, &signature).await;
+    log_confirmation(&signature, confirmed, error.as_deref());
 
     Ok(ExecutionResult {
         tx_signature: signature.to_string(),
-        confirmed: false, // Not confirmed yet, fire-and-forget
+        confirmed,
         actual_sol_lamports: 0,
         actual_token_amount: 0,
-        error: None,
+        error,
         executed_at,
     })
+}
+
+/// Poll the RPC for transaction confirmation up to a bounded timeout.
+///
+/// Returns `(confirmed, error)`. A trade counts as successful ONLY when it
+/// actually lands on-chain: a fire-and-forget send that returns a signature is
+/// not success (the tx can still be dropped), so callers must gate "success" on
+/// the returned `confirmed` flag, never on receiving a signature.
+async fn await_confirmation(rpc: &RpcClient, signature: &Signature) -> (bool, Option<String>) {
+    const MAX_ATTEMPTS: u32 = 10;
+    const POLL_INTERVAL_MS: u64 = 1500;
+
+    for _ in 0..MAX_ATTEMPTS {
+        match rpc.get_signature_status(signature) {
+            Ok(Some(Ok(()))) => return (true, None),
+            Ok(Some(Err(e))) => return (false, Some(format!("transaction failed on-chain: {e}"))),
+            Ok(None) | Err(_) => {} // not landed yet (or transient RPC error): keep polling
+        }
+        tokio::time::sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+
+    (
+        false,
+        Some(format!(
+            "not confirmed within {}ms (dropped or never landed)",
+            MAX_ATTEMPTS as u64 * POLL_INTERVAL_MS
+        )),
+    )
+}
+
+/// Emit a confirmation log at the level matching the outcome.
+fn log_confirmation(signature: &Signature, confirmed: bool, error: Option<&str>) {
+    if confirmed {
+        tracing::info!(signature = %signature, "transaction confirmed on-chain");
+    } else {
+        tracing::warn!(
+            signature = %signature,
+            reason = error.unwrap_or("unknown"),
+            "transaction NOT confirmed on-chain"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Jito bundle submission
 // ---------------------------------------------------------------------------
 
-/// Jito bundle tip accounts (round-robin).
+/// Jito bundle tip accounts (round-robin). Verified via getTipAccounts API.
 const JITO_TIP_ACCOUNTS: &[&str] = &[
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-    "HFqU5x63VTqvQss8hp11i4bVqkfRtQ7NmXwkiNPLYkNs",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
     "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
-    "ADaUMid9yfUytqMBgopwjb2DTLSLJn2HiHrEZeMKNd7R",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
     "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
@@ -180,13 +225,17 @@ pub async fn submit_jito_bundle(
     tip_lamports: u64,
     blockhash_cache: &BlockhashCache,
 ) -> Result<ExecutionResult, ExecutorError> {
-    let _rpc = RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
+    let rpc = RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
 
     // Build compute budget + tip instructions
     let mut all_ixs: Vec<Instruction> = Vec::with_capacity(instructions.len() + 3);
-    all_ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit));
+    all_ixs.push(ComputeBudgetInstruction::set_compute_unit_limit(
+        compute_unit_limit,
+    ));
     if priority_fee_microlamports > 0 {
-        all_ixs.push(ComputeBudgetInstruction::set_compute_unit_price(priority_fee_microlamports));
+        all_ixs.push(ComputeBudgetInstruction::set_compute_unit_price(
+            priority_fee_microlamports,
+        ));
     }
 
     // Add Jito tip instruction
@@ -195,7 +244,8 @@ pub async fn submit_jito_bundle(
             let idx = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs() as usize % JITO_TIP_ACCOUNTS.len();
+                .as_secs() as usize
+                % JITO_TIP_ACCOUNTS.len();
             JITO_TIP_ACCOUNTS[idx].parse().unwrap()
         };
         all_ixs.push(solana_sdk::system_instruction::transfer(
@@ -229,7 +279,7 @@ pub async fn submit_jito_bundle(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "sendBundle",
-            "params": [[encoded]]
+            "params": [[encoded], {"encoding": "base64"}]
         }))
         .send()
         .await;
@@ -237,14 +287,17 @@ pub async fn submit_jito_bundle(
     match resp {
         Ok(r) if r.status().is_success() => {
             let signature = tx.signatures[0];
-            tracing::info!(signature = %signature, "jito bundle submitted");
+            let executed_at = chrono::Utc::now().to_rfc3339();
+            tracing::info!(signature = %signature, "jito bundle submitted; awaiting confirmation");
+            let (confirmed, error) = await_confirmation(&rpc, &signature).await;
+            log_confirmation(&signature, confirmed, error.as_deref());
             Ok(ExecutionResult {
                 tx_signature: signature.to_string(),
-                confirmed: false,
+                confirmed,
                 actual_sol_lamports: 0,
                 actual_token_amount: 0,
-                error: None,
-                executed_at: chrono::Utc::now().to_rfc3339(),
+                error,
+                executed_at,
             })
         }
         Ok(r) => {
@@ -252,11 +305,27 @@ pub async fn submit_jito_bundle(
             let body = r.text().await.unwrap_or_default();
             tracing::warn!(status = %status, body = %body, "jito bundle failed, falling back to RPC");
             // Fall back to regular RPC
-            submit_transaction(rpc_url, keypair, instructions, priority_fee_microlamports, compute_unit_limit, blockhash_cache).await
+            submit_transaction(
+                rpc_url,
+                keypair,
+                instructions,
+                priority_fee_microlamports,
+                compute_unit_limit,
+                blockhash_cache,
+            )
+            .await
         }
         Err(e) => {
             tracing::warn!(error = %e, "jito request failed, falling back to RPC");
-            submit_transaction(rpc_url, keypair, instructions, priority_fee_microlamports, compute_unit_limit, blockhash_cache).await
+            submit_transaction(
+                rpc_url,
+                keypair,
+                instructions,
+                priority_fee_microlamports,
+                compute_unit_limit,
+                blockhash_cache,
+            )
+            .await
         }
     }
 }
@@ -299,7 +368,9 @@ pub fn create_ata_idempotent_ix(
     token_program_id: &Pubkey,
 ) -> Instruction {
     let ata = spl_associated_token_account::get_associated_token_address_with_program_id(
-        owner, mint, token_program_id,
+        owner,
+        mint,
+        token_program_id,
     );
     let ata_program: Pubkey = ATA_PROGRAM_ID.parse().unwrap();
     let system_program = solana_sdk::system_program::id();

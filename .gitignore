@@ -11,6 +11,9 @@ config/whales.json
 # Generated output
 /output/*.json
 
+# Runtime logs
+*.log
+
 # Agent memory
 .remember/
 

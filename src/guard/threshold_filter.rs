@@ -43,6 +43,7 @@ mod tests {
             passed_threshold: true,
             guard_skip_reason: None,
             decoded_at: None,
+            ix_accounts: None,
             execution: None,
         }
     }

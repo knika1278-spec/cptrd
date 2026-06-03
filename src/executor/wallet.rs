@@ -12,8 +12,7 @@ use solana_sdk::signature::Keypair;
 ///
 /// Returns error if env var is missing or invalid.
 pub fn load_keypair() -> anyhow::Result<Keypair> {
-    let pk = std::env::var("PRIVATE_KEY_BOT")
-        .context("PRIVATE_KEY_BOT env var not set")?;
+    let pk = std::env::var("PRIVATE_KEY_BOT").context("PRIVATE_KEY_BOT env var not set")?;
 
     if pk.trim().is_empty() || pk.trim() == "REPLACE_WITH_YOUR_PRIVATE_KEY_BASE58" {
         anyhow::bail!("PRIVATE_KEY_BOT env var is empty or placeholder");
@@ -67,10 +66,7 @@ fn keypair_from_bytes(bytes: &[u8]) -> anyhow::Result<Keypair> {
              (Solana CLI id.json format or base58-encoded private key)"
         )
     } else {
-        anyhow::bail!(
-            "keypair must be 64 bytes, got {}",
-            bytes.len()
-        )
+        anyhow::bail!("keypair must be 64 bytes, got {}", bytes.len())
     }
 }
 

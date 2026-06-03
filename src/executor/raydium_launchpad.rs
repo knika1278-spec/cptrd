@@ -2,37 +2,31 @@
 //!
 //! Builds buy/sell instructions for the Raydium Launchpad token-launch program.
 //!
+//! Strategy: copy ALL accounts from the whale's decoded instruction (via
+//! `params.ix_accounts`) and substitute only the user-specific accounts.
+//!
 //! Source: official IDL `github.com/raydium-io/raydium-idl/raydium_launchpad/
 //! raydium_launchpad.json` (`raydium_launchpad` v0.2.0) and `docs/dex-reference.md` §4.
 //!
-//! **NOTE:** This is the Launchpad/LaunchLab program. It is NOT Raydium AMM v4,
-//! CLMM, or CPMM — those are separate programs.
+//! # Account Layout (15 total)
 //!
-//! # Instruction Variants
-//!
-//! | Instruction        | Discriminator                            | Args                                    |
-//! |--------------------|------------------------------------------|-----------------------------------------|
-//! | buy_exact_in       | `[250,234,13,123,213,156,19,236]`        | amount_in, minimum_amount_out, share_fee_rate |
-//! | buy_exact_out      | `[24,211,116,40,105,3,153,56]`           | amount_out, maximum_amount_in, share_fee_rate |
-//! | sell_exact_in      | `[149,39,222,155,211,124,152,26]`        | amount_in, minimum_amount_out, share_fee_rate |
-//! | sell_exact_out     | `[95,200,71,34,8,9,11,166]`              | amount_out, maximum_amount_in, share_fee_rate |
-//!
-//! # Accounts (identical for all 4 variants)
-//! - 0: payer (trader, signer)
-//! - 1: authority (PDA)
-//! - 2: global_config
-//! - 3: platform_config
-//! - 4: pool_state
-//! - 5: user_base_token
-//! - 6: user_quote_token
-//! - 7: base_vault
-//! - 8: quote_vault
-//! - 9: base_token_mint (launched token)
-//! - 10: quote_token_mint (WSOL)
-//! - 11: base_token_program
-//! - 12: quote_token_program
-//! - 13: event_authority
-//! - 14: program
+//! | idx | account              | substitute? |
+//! |-----|----------------------|-------------|
+//! |  0  | payer (signer)       | YES         |
+//! |  1  | authority (PDA)      | no          |
+//! |  2  | global_config        | no          |
+//! |  3  | platform_config      | no          |
+//! |  4  | pool_state           | no          |
+//! |  5  | user_base_token      | YES         |
+//! |  6  | user_quote_token     | YES         |
+//! |  7  | base_vault           | no          |
+//! |  8  | quote_vault          | no          |
+//! |  9  | base_token_mint      | no          |
+//! | 10  | quote_token_mint     | no          |
+//! | 11  | base_token_program   | no          |
+//! | 12  | quote_token_program  | no          |
+//! | 13  | event_authority      | no          |
+//! | 14  | program              | no          |
 
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
@@ -46,16 +40,15 @@ const PROGRAM_ID: &str = "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj";
 
 // Discriminators (sha256("global:<name>")[..8])
 const DISC_BUY_EXACT_IN: [u8; 8] = [250, 234, 13, 123, 213, 156, 19, 236];
-#[allow(dead_code)]
-const DISC_BUY_EXACT_OUT: [u8; 8] = [24, 211, 116, 40, 105, 3, 153, 56];
 const DISC_SELL_EXACT_IN: [u8; 8] = [149, 39, 222, 155, 211, 124, 152, 26];
-#[allow(dead_code)]
-const DISC_SELL_EXACT_OUT: [u8; 8] = [95, 200, 71, 34, 8, 9, 11, 166];
 
-/// Well-known Raydium Launchpad accounts.
-const GLOBAL_CONFIG: &str = "8JdGBm6BPE4XPR5MJRz6kBo4CYzWnKSNzkVRS3tb1pLh";
-const PLATFORM_CONFIG: &str = "4abfirDoCpJwWYC7LqFbn5F3vMRWwJU670mEbiGPJ9iq";
-const EVENT_AUTHORITY: &str = "2DPAtEq3eJYbDRJLzDAc7URx9Y3iQ6CTNpoLhRTcQDyK";
+/// Minimum expected accounts for Raydium Launchpad.
+const MIN_ACCOUNTS: usize = 15;
+
+/// Account indices that must be substituted with our own.
+const IDX_PAYER: usize = 0;
+const IDX_USER_BASE_TOKEN: usize = 5;
+const IDX_USER_QUOTE_TOKEN: usize = 6;
 
 /// Raydium Launchpad executor.
 pub struct RaydiumLaunchpadExecutor {
@@ -71,75 +64,53 @@ impl RaydiumLaunchpadExecutor {
         }
     }
 
-    /// Derive the authority PDA for the launchpad program.
-    fn derive_authority(&self, pool_state: &Pubkey) -> Pubkey {
-        let (pda, _bump) =
-            Pubkey::find_program_address(&[b"authority", pool_state.as_ref()], &self.program_id);
-        pda
-    }
-
-    /// Find the pool state for a given token mint.
-    ///
-    /// Launchpad pools are created with a specific base token mint.
-    /// In production, this should be fetched from an indexer.
-    fn find_pool_state(&self, base_mint: &Pubkey) -> Option<Pubkey> {
-        let wsol_mint: Pubkey = "So11111111111111111111111111111111111111112"
-            .parse()
-            .unwrap();
-
-        // Pool state PDA seeds vary by pool type. For AMM pools:
-        // ["pool_state", base_mint, quote_mint]
-        let (pda, _bump) = Pubkey::find_program_address(
-            &[b"pool_state", base_mint.as_ref(), wsol_mint.as_ref()],
-            &self.program_id,
-        );
-        Some(pda)
-    }
-
-    fn build_accounts(
+    /// Build instruction accounts by taking the whale's accounts and
+    /// substituting user-specific entries.
+    fn build_accounts_from_whale(
         &self,
         payer: &Pubkey,
         base_mint: &Pubkey,
-        pool_state: &Pubkey,
-    ) -> Vec<AccountMeta> {
-        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
-            .parse()
-            .unwrap();
-        let authority = self.derive_authority(pool_state);
-        let global_config: Pubkey = GLOBAL_CONFIG.parse().unwrap();
-        let platform_config: Pubkey = PLATFORM_CONFIG.parse().unwrap();
-        let event_authority: Pubkey = EVENT_AUTHORITY.parse().unwrap();
+        quote_mint: &Pubkey,
+        whale_accounts: &[Pubkey],
+    ) -> Result<Vec<AccountMeta>, ExecutorError> {
+        if whale_accounts.len() < MIN_ACCOUNTS {
+            return Err(ExecutorError::InvalidAccount(format!(
+                "Raydium Launchpad whale accounts too short: {} (need >= {})",
+                whale_accounts.len(),
+                MIN_ACCOUNTS,
+            )));
+        }
 
-        let user_base_ata =
+        // Derive user ATAs
+        let user_base =
             spl_associated_token_account::get_associated_token_address(payer, base_mint);
-        let user_quote_ata =
-            spl_associated_token_account::get_associated_token_address(payer, &quote_mint);
+        let user_quote =
+            spl_associated_token_account::get_associated_token_address(payer, quote_mint);
 
-        // Vault ATAs (pool's token accounts)
-        let base_vault =
-            spl_associated_token_account::get_associated_token_address(pool_state, base_mint);
-        let quote_vault =
-            spl_associated_token_account::get_associated_token_address(pool_state, &quote_mint);
+        // Clone whale accounts and substitute user-specific ones
+        let mut accounts: Vec<AccountMeta> = whale_accounts
+            .iter()
+            .enumerate()
+            .map(|(i, pk)| {
+                let (writable, signer) = match i {
+                    0 => (true, true),                  // payer (signer)
+                    4 | 5 | 6 | 7 | 8 => (true, false), // pool_state, user tokens, vaults
+                    _ => (false, false),
+                };
+                AccountMeta {
+                    pubkey: *pk,
+                    is_signer: signer,
+                    is_writable: writable,
+                }
+            })
+            .collect();
 
-        let token_program = spl_token::id();
+        // Substitute user-specific accounts
+        accounts[IDX_PAYER].pubkey = *payer;
+        accounts[IDX_USER_BASE_TOKEN].pubkey = user_base;
+        accounts[IDX_USER_QUOTE_TOKEN].pubkey = user_quote;
 
-        vec![
-            AccountMeta::new(*payer, true),                  // 0: payer
-            AccountMeta::new_readonly(authority, false),     // 1: authority (PDA)
-            AccountMeta::new_readonly(global_config, false), // 2: global_config
-            AccountMeta::new_readonly(platform_config, false), // 3: platform_config
-            AccountMeta::new(*pool_state, false),            // 4: pool_state
-            AccountMeta::new(user_base_ata, false),          // 5: user_base_token
-            AccountMeta::new(user_quote_ata, false),         // 6: user_quote_token
-            AccountMeta::new(base_vault, false),             // 7: base_vault
-            AccountMeta::new(quote_vault, false),            // 8: quote_vault
-            AccountMeta::new_readonly(*base_mint, false),    // 9: base_token_mint
-            AccountMeta::new_readonly(quote_mint, false),    // 10: quote_token_mint
-            AccountMeta::new_readonly(token_program, false), // 11: base_token_program
-            AccountMeta::new_readonly(token_program, false), // 12: quote_token_program
-            AccountMeta::new_readonly(event_authority, false), // 13: event_authority
-            AccountMeta::new_readonly(self.program_id, false), // 14: program
-        ]
+        Ok(accounts)
     }
 }
 
@@ -153,31 +124,41 @@ impl DexExecutor for RaydiumLaunchpadExecutor {
         payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        let pool_state = self
-            .find_pool_state(&params.mint)
-            .ok_or_else(|| ExecutorError::PoolNotFound(params.mint.to_string()))?;
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound(
+                "Raydium Launchpad buy requires ix_accounts from whale tx".into(),
+            )
+        })?;
 
-        let accounts = self.build_accounts(payer, &params.mint, &pool_state);
+        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
+            .parse()
+            .unwrap();
 
-        // Use buy_exact_in: spend SOL, get tokens
+        // For buys: base = token, quote = WSOL
+        let accounts =
+            self.build_accounts_from_whale(payer, &params.mint, &quote_mint, whale_accounts)?;
+
         let max_amount_in = tx_utils::max_input_after_slippage(params.amount, params.slippage_bps);
-        let minimum_amount_out = 0u64;
-        let share_fee_rate = 0u64;
 
         let mut data = Vec::with_capacity(8 + 8 + 8 + 8);
         data.extend_from_slice(&DISC_BUY_EXACT_IN);
         data.extend_from_slice(&max_amount_in.to_le_bytes());
-        data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-        data.extend_from_slice(&share_fee_rate.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // minimum_amount_out = 0
+        data.extend_from_slice(&0u64.to_le_bytes()); // share_fee_rate = 0
 
         let ix = Instruction::new_with_bytes(self.program_id, &data, accounts);
 
-        // Create user token ATA (idempotent — no-op if exists)
+        // Create user token ATA (idempotent)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &spl_token::id()));
+        ixs.push(tx_utils::create_ata_idempotent_ix(
+            payer,
+            payer,
+            &params.mint,
+            &spl_token::id(),
+        ));
         ixs.push(ix);
 
-        Ok((ixs, minimum_amount_out))
+        Ok((ixs, 0))
     }
 
     fn build_sell_ixs(
@@ -185,24 +166,30 @@ impl DexExecutor for RaydiumLaunchpadExecutor {
         payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        let pool_state = self
-            .find_pool_state(&params.mint)
-            .ok_or_else(|| ExecutorError::PoolNotFound(params.mint.to_string()))?;
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound(
+                "Raydium Launchpad sell requires ix_accounts from whale tx".into(),
+            )
+        })?;
 
-        let accounts = self.build_accounts(payer, &params.mint, &pool_state);
+        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
+            .parse()
+            .unwrap();
 
-        // Use sell_exact_in: sell tokens, get SOL
-        let minimum_amount_out = tx_utils::min_output_after_slippage(0, params.slippage_bps);
-        let share_fee_rate = 0u64;
+        // For sells: base = token, quote = WSOL
+        let accounts =
+            self.build_accounts_from_whale(payer, &params.mint, &quote_mint, whale_accounts)?;
+
+        let min_amount_out = tx_utils::min_output_after_slippage(0, params.slippage_bps);
 
         let mut data = Vec::with_capacity(8 + 8 + 8 + 8);
         data.extend_from_slice(&DISC_SELL_EXACT_IN);
         data.extend_from_slice(&params.amount.to_le_bytes());
-        data.extend_from_slice(&minimum_amount_out.to_le_bytes());
-        data.extend_from_slice(&share_fee_rate.to_le_bytes());
+        data.extend_from_slice(&min_amount_out.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // share_fee_rate = 0
 
         let ix = Instruction::new_with_bytes(self.program_id, &data, accounts);
 
-        Ok((vec![ix], minimum_amount_out))
+        Ok((vec![ix], min_amount_out))
     }
 }

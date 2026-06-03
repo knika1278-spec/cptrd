@@ -211,7 +211,12 @@ impl DexExecutor for MeteoraDlmmExecutor {
 
         // Create user token ATA (idempotent — no-op if exists)
         let mut ixs = Vec::with_capacity(2);
-        ixs.push(tx_utils::create_ata_idempotent_ix(payer, payer, &params.mint, &spl_token::id()));
+        ixs.push(tx_utils::create_ata_idempotent_ix(
+            payer,
+            payer,
+            &params.mint,
+            &spl_token::id(),
+        ));
         ixs.push(ix);
 
         Ok((ixs, min_amount_out))

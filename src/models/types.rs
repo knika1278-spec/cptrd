@@ -136,6 +136,11 @@ pub struct DecodedTradeEvent {
     pub guard_skip_reason: Option<String>,
     /// Set later by the output layer (ISO-8601). Defaults to `None`.
     pub decoded_at: Option<String>,
+    /// Instruction accounts extracted from the whale transaction (used by
+    /// executors that need exact on-chain accounts rather than deriving PDAs,
+    /// e.g. PumpSwap AMM which has 21-23 accounts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ix_accounts: Option<Vec<String>>,
     /// Result of executing this trade (if execution was attempted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ExecutionResult>,
@@ -325,6 +330,7 @@ mod tests {
             passed_threshold: true,
             guard_skip_reason: None,
             decoded_at: None,
+            ix_accounts: None,
             execution: None,
         };
 

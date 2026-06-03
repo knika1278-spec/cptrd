@@ -80,6 +80,9 @@ pub struct TradeParams {
     pub priority_fee_microlamports: u64,
     /// Compute unit limit.
     pub compute_unit_limit: u32,
+    /// Instruction accounts from the whale's decoded transaction.
+    /// Used by executors (e.g. PumpSwap) that need exact on-chain accounts.
+    pub ix_accounts: Option<Vec<Pubkey>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +137,7 @@ pub async fn execute_copy_trade(
     action: TradeAction,
     dex: crate::models::types::DexProtocol,
     token_amount: u64,
+    ix_accounts: Option<Vec<String>>,
     protocol_configs: &crate::models::types::ProtocolConfigs,
     priority_fee_microlamports: u64,
     compute_unit_limit: u32,
@@ -188,29 +192,59 @@ pub async fn execute_copy_trade(
         slippage_bps: config.slippage_bps,
         priority_fee_microlamports,
         compute_unit_limit,
+        ix_accounts: ix_accounts
+            .and_then(|v| Some(v.iter().filter_map(|s| s.parse::<Pubkey>().ok()).collect())),
     };
 
     // Try the correct executor first, then fall back to others
     let executors: Vec<Box<dyn DexExecutor>> = match dex {
-        DexProtocol::PumpFun => vec![
-            Box::new(pumpfun::PumpFunExecutor::new()),
-        ],
-        DexProtocol::PumpSwap => vec![
-            Box::new(pumpswap::PumpSwapExecutor::new()),
-        ],
-        DexProtocol::RaydiumLaunchpad => vec![
-            Box::new(raydium_launchpad::RaydiumLaunchpadExecutor::new()),
-        ],
-        DexProtocol::RaydiumAmmV4 => vec![
-            Box::new(raydium_amm_v4::RaydiumAmmV4Executor::new()),
-        ],
-        DexProtocol::MeteoraDlmmV2 => vec![
-            Box::new(meteora_dlmm::MeteoraDlmmExecutor::new()),
-        ],
+        DexProtocol::PumpFun => vec![Box::new(pumpfun::PumpFunExecutor::new())],
+        DexProtocol::PumpSwap => vec![Box::new(pumpswap::PumpSwapExecutor::new())],
+        DexProtocol::RaydiumLaunchpad => {
+            vec![Box::new(raydium_launchpad::RaydiumLaunchpadExecutor::new())]
+        }
+        DexProtocol::RaydiumAmmV4 => vec![Box::new(raydium_amm_v4::RaydiumAmmV4Executor::new())],
+        DexProtocol::MeteoraDlmmV2 => vec![Box::new(meteora_dlmm::MeteoraDlmmExecutor::new())],
         DexProtocol::Unknown => return Err(ExecutorError::PoolNotFound("unknown DEX".to_string())),
     };
 
     let payer = keypair.pubkey();
+
+    // For sells, check if bot has any tokens before attempting
+    if action == TradeAction::Sell {
+        let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(rpc_url.to_string());
+        let mint_pk: solana_sdk::pubkey::Pubkey = mint
+            .parse()
+            .map_err(|_| ExecutorError::InvalidAccount(format!("invalid mint: {mint}")))?;
+
+        // Check balance using Token-2022 ATA (PumpFun/PumpSwap use Token-2022)
+        let ata_2022 = spl_associated_token_account::get_associated_token_address_with_program_id(
+            &payer,
+            &mint_pk,
+            &tx_utils::token_2022_program_id(),
+        );
+        let ata_spl = spl_associated_token_account::get_associated_token_address(&payer, &mint_pk);
+
+        // Try Token-2022 ATA first, then SPL Token ATA
+        let has_tokens = match rpc.get_token_account_balance(&ata_2022).await {
+            Ok(balance) => balance.amount.parse::<u64>().unwrap_or(0) > 0,
+            Err(_) => match rpc.get_token_account_balance(&ata_spl).await {
+                Ok(balance) => balance.amount.parse::<u64>().unwrap_or(0) > 0,
+                Err(_) => false,
+            },
+        };
+
+        if !has_tokens {
+            tracing::info!(
+                mint = %mint,
+                "skipping sell: bot has no tokens of this mint"
+            );
+            return Err(ExecutorError::InsufficientTokenBalance {
+                needed: 1,
+                available: 0,
+            });
+        }
+    }
 
     for executor in &executors {
         let ixs = match action {
@@ -241,16 +275,25 @@ pub async fn execute_copy_trade(
 
         if use_jito {
             return tx_utils::submit_jito_bundle(
-                rpc_url, keypair, &ixs,
-                priority_fee_microlamports, compute_unit_limit,
-                jito_tip_lamports, blockhash_cache,
-            ).await;
+                rpc_url,
+                keypair,
+                &ixs,
+                priority_fee_microlamports,
+                compute_unit_limit,
+                jito_tip_lamports,
+                blockhash_cache,
+            )
+            .await;
         } else {
             return tx_utils::submit_transaction(
-                rpc_url, keypair, &ixs,
-                priority_fee_microlamports, compute_unit_limit,
+                rpc_url,
+                keypair,
+                &ixs,
+                priority_fee_microlamports,
+                compute_unit_limit,
                 blockhash_cache,
-            ).await;
+            )
+            .await;
         }
     }
 

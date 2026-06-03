@@ -127,6 +127,7 @@ mod tests {
             passed_threshold,
             guard_skip_reason: None,
             decoded_at: None,
+            ix_accounts: None,
             execution: None,
         }
     }
@@ -143,10 +144,15 @@ mod tests {
 
         write_event(&event, dir.path()).expect("write event");
 
-        let path = dir.path().join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json");
+        let path = dir
+            .path()
+            .join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json");
         let events = read_events(&path);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].whale_address, "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt");
+        assert_eq!(
+            events[0].whale_address,
+            "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt"
+        );
         assert!(events[0].decoded_at.is_some());
         assert!(!events[0].decoded_at.as_ref().unwrap().is_empty());
     }
@@ -155,30 +161,67 @@ mod tests {
     fn events_for_different_whales_go_to_separate_files() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true), dir.path()).expect("write a");
-        write_event(&sample_event("D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V", false, true), dir.path()).expect("write b");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true),
+            dir.path(),
+        )
+        .expect("write a");
+        write_event(
+            &sample_event("D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V", false, true),
+            dir.path(),
+        )
+        .expect("write b");
 
-        let a = read_events(&dir.path().join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"));
-        let b = read_events(&dir.path().join("D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V.json"));
+        let a = read_events(
+            &dir.path()
+                .join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"),
+        );
+        let b = read_events(
+            &dir.path()
+                .join("D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V.json"),
+        );
         assert_eq!(a.len(), 1);
         assert_eq!(b.len(), 1);
-        assert_eq!(a[0].whale_address, "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt");
-        assert_eq!(b[0].whale_address, "D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V");
+        assert_eq!(
+            a[0].whale_address,
+            "EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt"
+        );
+        assert_eq!(
+            b[0].whale_address,
+            "D2wBctC1K2mEtA17i8ZfdEubkiksiAH2j8F7ri3ec71V"
+        );
     }
 
     #[test]
     fn all_guard_outcomes_for_one_whale_share_one_file() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true), dir.path()).expect("passed");
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, false), dir.path()).expect("skipped");
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", true, true), dir.path()).expect("bot");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true),
+            dir.path(),
+        )
+        .expect("passed");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, false),
+            dir.path(),
+        )
+        .expect("skipped");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", true, true),
+            dir.path(),
+        )
+        .expect("bot");
 
-        let events = read_events(&dir.path().join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"));
+        let events = read_events(
+            &dir.path()
+                .join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"),
+        );
         assert_eq!(events.len(), 3);
         // Flags are preserved inline for auditing.
         assert!(events.iter().any(|e| e.passed_threshold && !e.is_bot_whale));
-        assert!(events.iter().any(|e| !e.passed_threshold && !e.is_bot_whale));
+        assert!(events
+            .iter()
+            .any(|e| !e.passed_threshold && !e.is_bot_whale));
         assert!(events.iter().any(|e| e.is_bot_whale));
     }
 
@@ -186,20 +229,37 @@ mod tests {
     fn two_events_same_whale_append_into_array_of_two() {
         let dir = tempfile::tempdir().unwrap();
 
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true), dir.path()).expect("write first");
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true), dir.path()).expect("write second");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true),
+            dir.path(),
+        )
+        .expect("write first");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true),
+            dir.path(),
+        )
+        .expect("write second");
 
-        let events = read_events(&dir.path().join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"));
+        let events = read_events(
+            &dir.path()
+                .join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json"),
+        );
         assert_eq!(events.len(), 2);
     }
 
     #[test]
     fn malformed_existing_file_recovers_to_single_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json");
+        let path = dir
+            .path()
+            .join("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt.json");
         std::fs::write(&path, "not json").expect("seed malformed file");
 
-        write_event(&sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true), dir.path()).expect("write recovers");
+        write_event(
+            &sample_event("EwTNPYTuwxMzrvL19nzBsSLXdAoEmVBKkisN87csKgtt", false, true),
+            dir.path(),
+        )
+        .expect("write recovers");
 
         let events = read_events(&path);
         assert_eq!(events.len(), 1);

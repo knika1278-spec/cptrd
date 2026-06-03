@@ -4,66 +4,56 @@
 //!
 //! **Program ID:** `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`
 //!
-//! This is the main Raydium AMM — NOT the Launchpad/LaunchLab, CLMM, or CPMM.
+//! Strategy: copy ALL accounts from the whale's decoded instruction (via
+//! `params.ix_accounts`) and substitute only the user-specific accounts
+//! (user_source_token_account, user_dest_token_account, user_owner).
 //!
-//! # Swap Instruction (legacy format, type = 9)
+//! # Account Layout (18 total)
 //!
-//! - Byte 0: instruction type (`9` = swap)
-//! - Bytes 1-8: `amount_in` (u64 LE)
-//! - Bytes 9-16: `minimum_amount_out` (u64 LE)
-//!
-//! Direction is determined by which token the user sends vs receives.
-//! The `user_source_token_account` and `user_dest_token_account` accounts
-//! indicate the direction.
-//!
-//! # Accounts (18 total, legacy Serum DEX integration)
-//!
-//! | idx | account |
-//! |-----|---------|
-//! | 0  | token_program |
-//! | 1  | amm (pool state) |
-//! | 2  | amm_authority (PDA) |
-//! | 3  | amm_open_orders |
-//! | 4  | amm_target_orders |
-//! | 5  | pool_coin_token_account |
-//! | 6  | pool_pc_token_account |
-//! | 7  | serum_program |
-//! | 8  | serum_market |
-//! | 9  | serum_bids |
-//! | 10 | serum_asks |
-//! | 11 | serum_event_queue |
-//! | 12 | serum_coin_vault |
-//! | 13 | serum_pc_vault |
-//! | 14 | serum_vault_signer |
-//! | 15 | user_source_token_account |
-//! | 16 | user_dest_token_account |
-//! | 17 | user_owner (signer) |
+//! | idx | account                       | substitute? |
+//! |-----|-------------------------------|-------------|
+//! |  0  | token_program                 | no          |
+//! |  1  | amm (pool state)              | no          |
+//! |  2  | amm_authority (PDA)           | no          |
+//! |  3  | amm_open_orders               | no          |
+//! |  4  | amm_target_orders             | no          |
+//! |  5  | pool_coin_token_account       | no          |
+//! |  6  | pool_pc_token_account         | no          |
+//! |  7  | serum_program                 | no          |
+//! |  8  | serum_market                  | no          |
+//! |  9  | serum_bids                    | no          |
+//! | 10  | serum_asks                    | no          |
+//! | 11  | serum_event_queue             | no          |
+//! | 12  | serum_coin_vault              | no          |
+//! | 13  | serum_pc_vault                | no          |
+//! | 14  | serum_vault_signer            | no          |
+//! | 15  | user_source_token_account     | YES         |
+//! | 16  | user_dest_token_account       | YES         |
+//! | 17  | user_owner (signer)           | YES         |
 
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
 };
 
-use super::{DexExecutor, ExecutorError, TradeParams};
+use super::{tx_utils, DexExecutor, ExecutorError, TradeParams};
 
 /// Raydium AMM v4 program ID.
 const PROGRAM_ID: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 
-/// Raydium AMM Authority (PDA derived from the AMM program).
-#[allow(dead_code)]
-const AMM_AUTHORITY: &str = "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1";
+/// Minimum expected accounts for Raydium AMM v4 swap.
+const MIN_ACCOUNTS: usize = 18;
 
-/// Serum DEX v3 program (used by Raydium AMM v4 for orderbook).
-#[allow(dead_code)]
-const SERUM_PROGRAM: &str = "srmqPvymJeFKQ4zGQed1GFppgkRHL9kaELCbyksJtPX";
+/// Account indices that must be substituted with our own.
+const IDX_USER_SOURCE: usize = 15;
+const IDX_USER_DEST: usize = 16;
+const IDX_USER_OWNER: usize = 17;
 
 /// Raydium AMM v4 executor.
-#[allow(dead_code)]
 pub struct RaydiumAmmV4Executor {
     program_id: Pubkey,
 }
 
-#[allow(dead_code)]
 impl RaydiumAmmV4Executor {
     pub fn new() -> Self {
         Self {
@@ -71,69 +61,53 @@ impl RaydiumAmmV4Executor {
         }
     }
 
-    /// Derive the AMM authority PDA.
-    fn derive_authority(&self) -> Pubkey {
-        AMM_AUTHORITY.parse().unwrap()
-    }
-
-    /// Build a swap instruction.
-    ///
-    /// For Raydium AMM v4, the direction is implicit from the source/dest accounts.
-    /// `source_mint` = token being sold, `dest_mint` = token being bought.
-    fn build_swap_ix(
+    /// Build instruction accounts by taking the whale's accounts and
+    /// substituting user-specific entries.
+    fn build_accounts_from_whale(
         &self,
         payer: &Pubkey,
-        source_mint: &Pubkey,
-        dest_mint: &Pubkey,
-        amount_in: u64,
-        min_amount_out: u64,
-        amm_account: &Pubkey,
-        open_orders: &Pubkey,
-        target_orders: &Pubkey,
-        pool_coin_account: &Pubkey,
-        pool_pc_account: &Pubkey,
-        serum_market: &Pubkey,
-        serum_bids: &Pubkey,
-        serum_asks: &Pubkey,
-        serum_event_queue: &Pubkey,
-        serum_coin_vault: &Pubkey,
-        serum_pc_vault: &Pubkey,
-        serum_vault_signer: &Pubkey,
-    ) -> Instruction {
-        let authority = self.derive_authority();
-        let user_source = spl_associated_token_account::get_associated_token_address(payer, source_mint);
-        let user_dest = spl_associated_token_account::get_associated_token_address(payer, dest_mint);
-        let token_program = spl_token::id();
-        let serum_program: Pubkey = SERUM_PROGRAM.parse().unwrap();
+        base_mint: &Pubkey,
+        quote_mint: &Pubkey,
+        whale_accounts: &[Pubkey],
+    ) -> Result<Vec<AccountMeta>, ExecutorError> {
+        if whale_accounts.len() < MIN_ACCOUNTS {
+            return Err(ExecutorError::InvalidAccount(format!(
+                "Raydium AMM v4 whale accounts too short: {} (need >= {})",
+                whale_accounts.len(),
+                MIN_ACCOUNTS,
+            )));
+        }
 
-        let accounts = vec![
-            AccountMeta::new_readonly(token_program, false),     // 0
-            AccountMeta::new(*amm_account, false),               // 1
-            AccountMeta::new_readonly(authority, false),         // 2
-            AccountMeta::new(*open_orders, false),               // 3
-            AccountMeta::new(*target_orders, false),             // 4
-            AccountMeta::new(*pool_coin_account, false),         // 5
-            AccountMeta::new(*pool_pc_account, false),           // 6
-            AccountMeta::new_readonly(serum_program, false),     // 7
-            AccountMeta::new(*serum_market, false),              // 8
-            AccountMeta::new(*serum_bids, false),                // 9
-            AccountMeta::new(*serum_asks, false),                // 10
-            AccountMeta::new(*serum_event_queue, false),         // 11
-            AccountMeta::new(*serum_coin_vault, false),          // 12
-            AccountMeta::new(*serum_pc_vault, false),            // 13
-            AccountMeta::new_readonly(*serum_vault_signer, false), // 14
-            AccountMeta::new(user_source, false),                // 15
-            AccountMeta::new(user_dest, false),                  // 16
-            AccountMeta::new(*payer, true),                      // 17
-        ];
+        // Derive user ATAs
+        let user_source =
+            spl_associated_token_account::get_associated_token_address(payer, base_mint);
+        let user_dest =
+            spl_associated_token_account::get_associated_token_address(payer, quote_mint);
 
-        // Instruction data: type(1) + amount_in(8) + min_amount_out(8)
-        let mut data = Vec::with_capacity(17);
-        data.push(9u8); // swap instruction type
-        data.extend_from_slice(&amount_in.to_le_bytes());
-        data.extend_from_slice(&min_amount_out.to_le_bytes());
+        // Clone whale accounts and substitute user-specific ones
+        let mut accounts: Vec<AccountMeta> = whale_accounts
+            .iter()
+            .enumerate()
+            .map(|(i, pk)| {
+                let (writable, signer) = match i {
+                    1 | 3 | 4 | 5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 15 | 16 => (true, false),
+                    17 => (true, true), // user owner (signer)
+                    _ => (false, false),
+                };
+                AccountMeta {
+                    pubkey: *pk,
+                    is_signer: signer,
+                    is_writable: writable,
+                }
+            })
+            .collect();
 
-        Instruction::new_with_bytes(self.program_id, &data, accounts)
+        // Substitute user-specific accounts
+        accounts[IDX_USER_SOURCE].pubkey = user_source;
+        accounts[IDX_USER_DEST].pubkey = user_dest;
+        accounts[IDX_USER_OWNER].pubkey = *payer;
+
+        Ok(accounts)
     }
 }
 
@@ -144,28 +118,44 @@ impl DexExecutor for RaydiumAmmV4Executor {
 
     fn build_buy_ixs(
         &self,
-        _payer: &Pubkey,
+        payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        // For buys: spend WSOL to get the token.
-        // In Raydium AMM terms: source = WSOL (pc), dest = token (coin).
-        //
-        // NOTE: In production, the AMM account and all its sub-accounts (open_orders,
-        // target_orders, pool_coin, pool_pc, serum_market, etc.) must be resolved
-        // on-chain. For now, this executor returns an error indicating that pool
-        // discovery is needed — the execute_copy_trade orchestrator will fall through
-        // to the next executor.
-        //
-        // TODO: Implement on-chain AMM account resolution via getAccountInfo or
-        // a Raydium pool indexer API.
-        let _wsol_mint: Pubkey = "So11111111111111111111111111111111111111112"
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound(
+                "Raydium AMM v4 buy requires ix_accounts from whale tx".into(),
+            )
+        })?;
+
+        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
             .parse()
             .unwrap();
 
-        Err(ExecutorError::PoolNotFound(format!(
-            "Raydium AMM v4 pool discovery not yet implemented for mint {}",
-            params.mint
-        )))
+        // For buys: source = WSOL, dest = token
+        let accounts =
+            self.build_accounts_from_whale(payer, &quote_mint, &params.mint, whale_accounts)?;
+
+        // amount_in = SOL with slippage, min_amount_out = 0 (any)
+        let amount_in = tx_utils::max_input_after_slippage(params.amount, params.slippage_bps);
+
+        let mut data = Vec::with_capacity(17);
+        data.push(9u8); // swap instruction type
+        data.extend_from_slice(&amount_in.to_le_bytes());
+        data.extend_from_slice(&0u64.to_le_bytes()); // min_amount_out = 0
+
+        let ix = Instruction::new_with_bytes(self.program_id, &data, accounts);
+
+        // Create ATA for token (idempotent)
+        let mut ixs = Vec::with_capacity(2);
+        ixs.push(tx_utils::create_ata_idempotent_ix(
+            payer,
+            payer,
+            &params.mint,
+            &spl_token::id(),
+        ));
+        ixs.push(ix);
+
+        Ok((ixs, 0))
     }
 
     fn build_sell_ixs(
@@ -173,11 +163,29 @@ impl DexExecutor for RaydiumAmmV4Executor {
         payer: &Pubkey,
         params: &TradeParams,
     ) -> Result<(Vec<Instruction>, u64), ExecutorError> {
-        // Same as buy — pool discovery needed first.
-        let _ = (payer, params);
-        Err(ExecutorError::PoolNotFound(format!(
-            "Raydium AMM v4 pool discovery not yet implemented for mint {}",
-            params.mint
-        )))
+        let whale_accounts = params.ix_accounts.as_ref().ok_or_else(|| {
+            ExecutorError::PoolNotFound(
+                "Raydium AMM v4 sell requires ix_accounts from whale tx".into(),
+            )
+        })?;
+
+        let quote_mint: Pubkey = "So11111111111111111111111111111111111111112"
+            .parse()
+            .unwrap();
+
+        // For sells: source = token, dest = WSOL
+        let accounts =
+            self.build_accounts_from_whale(payer, &params.mint, &quote_mint, whale_accounts)?;
+
+        let min_amount_out = tx_utils::min_output_after_slippage(0, params.slippage_bps);
+
+        let mut data = Vec::with_capacity(17);
+        data.push(9u8); // swap instruction type
+        data.extend_from_slice(&params.amount.to_le_bytes());
+        data.extend_from_slice(&min_amount_out.to_le_bytes());
+
+        let ix = Instruction::new_with_bytes(self.program_id, &data, accounts);
+
+        Ok((vec![ix], min_amount_out))
     }
 }
